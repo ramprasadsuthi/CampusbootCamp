@@ -1,0 +1,6 @@
+{
+  "name": "Campus Placement Assessment Portal",
+  "description": "Comprehensive 40-Day Campus Readiness Bootcamp & Placement Assessment Portal for TCS NQT, Infosys, Accenture, Cognizant, Capgemini, and Wipro drives with interactive assessments, coding sandbox, mock interviews, AI analytics, and reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
