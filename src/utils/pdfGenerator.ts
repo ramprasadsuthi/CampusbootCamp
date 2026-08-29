@@ -20,11 +20,11 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(18);
-  doc.text('CAMPUS PLACEMENT READINESS REPORT', 14, 16);
+  doc.text('TALENT EDGE - PLACEMENT READINESS REPORT', 14, 16);
 
   doc.setFontSize(10);
   doc.setFont('helvetica', 'normal');
-  doc.text('40-Day Intensive Campus Readiness Bootcamp | Verified Candidate Dossier', 14, 24);
+  doc.text('Talent Edge Placement Accelerator Program | 40-Day Bootcamp Dossier', 14, 24);
   doc.text(`Generated on: ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`, 14, 30);
 
   // Student Info Card Box
@@ -179,7 +179,7 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   doc.setTextColor(148, 163, 184);
-  doc.text('Campus Placement Cell | Certified Digitally Signed Report | Document ID: NIT-CPR-2026-8849', 14, 288);
+  doc.text('Talent Edge Placement Cell | Certified Digitally Signed Report | Document ID: TED-CPR-2026-8849', 14, 288);
   doc.text('Page 1 of 1', 185, 288);
 
   // Save the PDF

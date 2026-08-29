@@ -78,10 +78,13 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({ student, onC
             Certificate of Excellence & Placement Readiness
           </span>
           <h2 className="text-2xl sm:text-4xl font-serif font-black text-slate-900 dark:text-white mt-2 tracking-tight">
-            40-Day Campus Readiness Bootcamp
+            Talent Edge 40-Day Placement Bootcamp
           </h2>
-          <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            Certified by the Directorate of Training & Campus Placements
+          <p className="text-xs sm:text-sm font-semibold text-indigo-600 dark:text-indigo-400 mt-1">
+            Placement Accelerator Program
+          </p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Certified by the Talent Edge Directorate of Training & Placements
           </p>
         </div>
 

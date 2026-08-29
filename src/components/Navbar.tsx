@@ -57,15 +57,20 @@ export const Navbar: React.FC<NavbarProps> = ({
         </button>
 
         <div className="flex items-center space-x-2.5">
-          <div className="bg-indigo-600 h-8 w-8 rounded-lg flex items-center justify-center text-white font-bold shadow-xs">
-            C
+          <div className="bg-indigo-600 h-9 w-9 rounded-lg flex items-center justify-center text-white font-bold text-base shadow-xs shrink-0">
+            T
           </div>
-          <h1 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white tracking-tight flex items-center gap-1.5">
-            <span>Campus Readiness</span>
-            <span className="text-indigo-600 dark:text-indigo-400 font-semibold italic text-sm sm:text-base">
-              40-Day Bootcamp
-            </span>
-          </h1>
+          <div className="flex flex-col justify-center">
+            <h1 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white tracking-tight flex items-center gap-1.5 leading-tight">
+              <span>Talent Edge</span>
+              <span className="text-indigo-600 dark:text-indigo-400 font-semibold italic text-xs sm:text-sm">
+                Bootcamp
+              </span>
+            </h1>
+            <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium tracking-tight leading-none mt-0.5">
+              Placement Accelerator Program
+            </p>
+          </div>
         </div>
       </div>
 
