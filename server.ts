@@ -3,6 +3,7 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import mysql from 'mysql2/promise';
 
 dotenv.config();
 
@@ -10,6 +11,17 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Initialize MySQL pool
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'talentedge',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
 
 // Lazy-initialized Gemini AI client
 let geminiClient: GoogleGenAI | null = null;
@@ -28,6 +40,118 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     aiConfigured: Boolean(process.env.GEMINI_API_KEY),
   });
+});
+
+// Fetch all students from MySQL
+app.get('/api/students', async (req, res) => {
+  try {
+    const [rows]: any = await pool.query(`
+      SELECT 
+        sp.*, 
+        u.name, u.email, u.rollNo, u.phone, u.avatar as photo, u.college, u.department, u.branch, u.trainerName as trainer,
+        b.name as batch
+      FROM StudentProfiles sp
+      JOIN Users u ON sp.id = u.id
+      LEFT JOIN Batches b ON sp.batchId = b.id
+    `);
+
+    const students = rows.map((student: any) => ({
+      ...student,
+      metrics: {
+        coding: student.coding,
+        aptitude: student.aptitude,
+        reasoning: student.reasoning,
+        sql: student.sqlScore,
+        csFundamentals: student.csFundamentals,
+        communication: student.communication,
+        techInterview: student.techInterview,
+        hrInterview: student.hrInterview,
+        overallReadiness: student.overallReadiness,
+      },
+      eligibility: JSON.parse(student.eligibilityJson || '[]'),
+      weakAreas: JSON.parse(student.weakAreasJson || '[]'),
+      strengths: JSON.parse(student.strengthsJson || '[]'),
+      recentRemarks: JSON.parse(student.recentRemarksJson || '[]'),
+    }));
+
+    res.json(students);
+  } catch (error) {
+    console.error('Error fetching students:', error);
+    res.status(500).json({ error: 'Database query failed' });
+  }
+});
+
+// Fetch all batches from MySQL
+app.get('/api/batches', async (req, res) => {
+  try {
+    const [rows]: any = await pool.query('SELECT * FROM Batches');
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching batches:', error);
+    res.status(500).json({ error: 'Database query failed' });
+  }
+});
+
+// Fetch all notifications from MySQL
+app.get('/api/notifications', async (req, res) => {
+  try {
+    const [rows]: any = await pool.query('SELECT * FROM Notifications ORDER BY createdAt DESC');
+    res.json(rows.map((n: any) => ({ ...n, unread: Boolean(n.unread) })));
+  } catch (error) {
+    console.error('Error fetching notifications:', error);
+    res.status(500).json({ error: 'Database query failed' });
+  }
+});
+
+// Save remarks and update interview scores
+app.post('/api/students/:id/remarks', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { remark, score, type } = req.body;
+
+    const [students]: any = await pool.query('SELECT recentRemarksJson, coding, aptitude, reasoning, sqlScore, csFundamentals, communication, techInterview, hrInterview FROM StudentProfiles WHERE id = ?', [id]);
+    if (students.length === 0) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const student = students[0];
+    const recentRemarks = JSON.parse(student.recentRemarksJson || '[]');
+    recentRemarks.unshift(remark);
+
+    const scoreCol = type === 'tech' ? 'techInterview' : 'hrInterview';
+    const coding = student.coding;
+    const aptitude = student.aptitude;
+    const reasoning = student.reasoning;
+    const sqlScore = student.sqlScore;
+    const csFundamentals = student.csFundamentals;
+    const communication = student.communication;
+    
+    const techInterview = type === 'tech' ? score : student.techInterview;
+    const hrInterview = type === 'hr' ? score : student.hrInterview;
+
+    const overallReadiness = Math.round(
+      (coding * 0.25) + 
+      (aptitude * 0.15) + 
+      (reasoning * 0.1) + 
+      (sqlScore * 0.1) + 
+      (csFundamentals * 0.1) + 
+      (communication * 0.1) + 
+      (techInterview * 0.1) + 
+      (hrInterview * 0.1)
+    );
+
+    await pool.query(
+      `UPDATE StudentProfiles 
+       SET recentRemarksJson = ?, ${scoreCol} = ?, overallReadiness = ?, placementReadinessScore = ?
+       WHERE id = ?`,
+      [JSON.stringify(recentRemarks), score, overallReadiness, overallReadiness, id]
+    );
+
+    res.json({ success: true, updatedReadiness: overallReadiness });
+  } catch (error) {
+    console.error('Error updating remarks:', error);
+    res.status(500).json({ error: 'Database update failed' });
+  }
 });
 
 // AI: Personalized Recommendations
@@ -227,7 +351,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Campus Placement Portal] Server running on http://0.0.0.0:${PORT}`);
+    console.log(`[Campus Placement Portal] Server running on http://localhost:${PORT}`);
   });
 }
 

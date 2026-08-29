@@ -195,3 +195,31 @@ export async function executeCodeOnServer(params: {
     };
   }
 }
+
+export async function fetchStudents(): Promise<any[]> {
+  const res = await fetch('/api/students');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function fetchBatches(): Promise<any[]> {
+  const res = await fetch('/api/batches');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function fetchNotifications(): Promise<any[]> {
+  const res = await fetch('/api/notifications');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function updateStudentRemarks(studentId: string, params: { remark: any; score: number; type: 'tech' | 'hr' }): Promise<any> {
+  const res = await fetch(`/api/students/${studentId}/remarks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}

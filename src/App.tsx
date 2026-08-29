@@ -14,6 +14,7 @@ import { LeaderboardView } from './components/LeaderboardView';
 import { CertificateModal } from './components/CertificateModal';
 import { AiInsightsModal } from './components/AiInsightsModal';
 import { SAMPLE_STUDENTS } from './data/mockData';
+import { fetchStudents, updateStudentRemarks } from './services/api';
 import { generateStudentReportPDF, exportBatchCSV } from './utils/pdfGenerator';
 import { StudentProfile, UserRole } from './types';
 import {
@@ -62,6 +63,18 @@ export default function App() {
     },
   ];
 
+  // Fetch students from MySQL on component mount
+  useEffect(() => {
+    fetchStudents()
+      .then((data) => {
+        if (data && data.length > 0) {
+          setStudents(data);
+          setSelectedStudent(data[0]);
+        }
+      })
+      .catch((err) => console.error('Failed to fetch students from DB:', err));
+  }, []);
+
   // Dark mode effect
   useEffect(() => {
     if (darkMode) {
@@ -77,29 +90,37 @@ export default function App() {
     setActiveTab('dashboard');
   };
 
-  // Handle remarks update from InterviewPanel
-  const handleUpdateRemarks = (studentId: string, remark: any, newScore: number) => {
-    setStudents((prev) =>
-      prev.map((st) => {
-        if (st.id === studentId) {
-          const updatedRemarks = [remark, ...st.recentRemarks];
-          const updatedMetrics = {
-            ...st.metrics,
-            [remark.type === 'tech' ? 'techInterview' : 'hrInterview']: newScore,
-          };
-          const newStudent = {
-            ...st,
-            metrics: updatedMetrics,
-            recentRemarks: updatedRemarks,
-          };
-          if (selectedStudent.id === studentId) {
-            setSelectedStudent(newStudent);
+  // Handle remarks update from InterviewPanel calling MySQL Backend
+  const handleUpdateRemarks = async (studentId: string, remark: any, newScore: number) => {
+    try {
+      const response = await updateStudentRemarks(studentId, { remark, score: newScore, type: remark.type });
+      
+      setStudents((prev) =>
+        prev.map((st) => {
+          if (st.id === studentId) {
+            const updatedRemarks = [remark, ...st.recentRemarks];
+            const updatedMetrics = {
+              ...st.metrics,
+              [remark.type === 'tech' ? 'techInterview' : 'hrInterview']: newScore,
+              overallReadiness: response.updatedReadiness
+            };
+            const newStudent = {
+              ...st,
+              placementReadinessScore: response.updatedReadiness,
+              metrics: updatedMetrics,
+              recentRemarks: updatedRemarks,
+            };
+            if (selectedStudent.id === studentId) {
+              setSelectedStudent(newStudent);
+            }
+            return newStudent;
           }
-          return newStudent;
-        }
-        return st;
-      })
-    );
+          return st;
+        })
+      );
+    } catch (error) {
+      console.error('Failed to update student remarks on server:', error);
+    }
   };
 
   // Render view based on active tab and role
