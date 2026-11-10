@@ -15,27 +15,23 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { ASSESSMENTS_CATALOG } from '../data/assessmentData';
 import { CodeEditor } from './CodeEditor';
-import { fetchAiRecommendations } from '../services/api';
+import { fetchAiRecommendations, submitWorkspaceAssessment } from '../services/api';
 import { Assessment, CodingProblem, MCQQuestion, QuestionItem, StudentProfile } from '../types';
 
 interface AssessmentPlayerProps {
-  assessmentId: string;
+  assessment: Assessment;
   student: StudentProfile;
   onClose: () => void;
   onAssessmentCompleted?: (score: number) => void;
 }
 
 export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
-  assessmentId,
+  assessment,
   student,
   onClose,
   onAssessmentCompleted,
 }) => {
-  const assessment: Assessment =
-    ASSESSMENTS_CATALOG.find((a) => a.id === assessmentId) || ASSESSMENTS_CATALOG[ASSESSMENTS_CATALOG.length - 1];
-
   // Flatten all questions across sections
   const allQuestions: { question: QuestionItem; sectionName: string; index: number }[] = [];
   assessment.sections.forEach((sec) => {
@@ -54,15 +50,18 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
   const [visited, setVisited] = useState<Record<number, boolean>>({ 0: true });
   const [codingScores, setCodingScores] = useState<Record<number, number>>({});
   const [isSubmitted, setIsSubmitted] = useState<boolean>(false);
+  const [isSavingSubmission, setIsSavingSubmission] = useState(false);
+  const [submissionError, setSubmissionError] = useState('');
+  const [finalPercent, setFinalPercent] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [showSubmitModal, setShowSubmitModal] = useState<boolean>(false);
   const [timeLeftSeconds, setTimeLeftSeconds] = useState<number>(assessment.durationMinutes * 60);
-  const [autoSavedTime, setAutoSavedTime] = useState<string>('Just now');
   const [aiPlan, setAiPlan] = useState<string>('');
   const [loadingAi, setLoadingAi] = useState<boolean>(false);
 
   // Timer countdown
   useEffect(() => {
-    if (isSubmitted) return;
+    if (isSubmitted || isSavingSubmission) return;
     const interval = setInterval(() => {
       setTimeLeftSeconds((prev) => {
         if (prev <= 1) {
@@ -74,15 +73,7 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [isSubmitted]);
-
-  // Periodic Auto-save indicator
-  useEffect(() => {
-    const autoSaveInterval = setInterval(() => {
-      setAutoSavedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-    }, 15000);
-    return () => clearInterval(autoSaveInterval);
-  }, []);
+  }, [isSubmitted, isSavingSubmission]);
 
   const formatTimer = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -132,8 +123,10 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
 
   // Submit assessment logic
   const handleSubmitAssessment = async () => {
+    if (isSavingSubmission || isSubmitted) return;
     setShowSubmitModal(false);
-    setIsSubmitted(true);
+    setSubmissionError('');
+    setIsSavingSubmission(true);
 
     // Calculate score
     let calculatedMarks = 0;
@@ -148,46 +141,42 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
         }
       } else if (item.question.type === 'coding') {
         maxMarks += 30;
-        const codeScorePercent = codingScores[idx] || 100;
+        const codeScorePercent = codingScores[idx] ?? 0;
         calculatedMarks += (codeScorePercent / 100) * 30;
       }
     });
 
-    const finalPercent = maxMarks > 0 ? Math.round((calculatedMarks / maxMarks) * 100) : 85;
-
-    // Confetti on good score
-    if (finalPercent >= 70) {
-      try {
-        confetti({
-          particleCount: 80,
-          spread: 70,
-          origin: { y: 0.6 },
-        });
-      } catch {}
-    }
-
-    if (onAssessmentCompleted) {
-      onAssessmentCompleted(finalPercent);
-    }
-
-    // Trigger AI recommendations
-    setLoadingAi(true);
+    const calculatedPercent = maxMarks > 0 ? Math.round((calculatedMarks / maxMarks) * 100) : 0;
+    const timeSpentSeconds = Math.max(0, assessment.durationMinutes * 60 - timeLeftSeconds);
     try {
-      const res = await fetchAiRecommendations({
-        studentName: student.name,
-        scores: {
-          assessmentScore: finalPercent,
-          coding: student.metrics.coding,
-          aptitude: student.metrics.aptitude,
-        },
-        weakAreas: student.weakAreas,
-        targetCompanies: assessment.targetCompanies,
-      });
-      setAiPlan(res.recommendation);
-    } catch (e) {
-      console.error(e);
+      const savedAttempt = await submitWorkspaceAssessment(assessment.id, { answers, codingScores, timeSpentSeconds });
+      const score = savedAttempt.percentage ?? calculatedPercent;
+      setFinalPercent(score);
+      setElapsedSeconds(savedAttempt.timeSpentSeconds);
+      setIsSubmitted(true);
+      if (score >= 70) {
+        try { confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } }); } catch {}
+      }
+      onAssessmentCompleted?.(score);
+      setLoadingAi(true);
+      try {
+        const res = await fetchAiRecommendations({
+          studentName: student.name,
+          scores: { assessmentScore: score, coding: student.metrics.coding, aptitude: student.metrics.aptitude },
+          weakAreas: student.weakAreas,
+          targetCompanies: assessment.targetCompanies,
+        });
+        setAiPlan(res.recommendation);
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setLoadingAi(false);
+      }
+    } catch (error) {
+      setSubmissionError(error instanceof Error ? error.message : 'Could not save your attempt. Please retry.');
+      setShowSubmitModal(true);
     } finally {
-      setLoadingAi(false);
+      setIsSavingSubmission(false);
     }
   };
 
@@ -221,19 +210,19 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-2xl mx-auto pt-4">
             <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900/60">
               <span className="text-xs text-indigo-700 dark:text-indigo-300 font-bold uppercase block">Overall Score</span>
-              <span className="text-2xl font-extrabold text-indigo-900 dark:text-indigo-100">88%</span>
+              <span className="text-2xl font-extrabold text-indigo-900 dark:text-indigo-100">{finalPercent ?? 0}%</span>
             </div>
             <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-100 dark:border-emerald-900/60">
               <span className="text-xs text-emerald-700 dark:text-emerald-300 font-bold uppercase block">Accuracy</span>
-              <span className="text-2xl font-extrabold text-emerald-900 dark:text-emerald-100">91.6%</span>
+              <span className="text-2xl font-extrabold text-emerald-900 dark:text-emerald-100">{finalPercent ?? 0}%</span>
             </div>
             <div className="p-4 rounded-2xl bg-blue-50 dark:bg-blue-950/40 border border-blue-100 dark:border-blue-900/60">
               <span className="text-xs text-blue-700 dark:text-blue-300 font-bold uppercase block">Time Taken</span>
-              <span className="text-2xl font-extrabold text-blue-900 dark:text-blue-100">42m 18s</span>
+              <span className="text-2xl font-extrabold text-blue-900 dark:text-blue-100">{formatTimer(elapsedSeconds)}</span>
             </div>
             <div className="p-4 rounded-2xl bg-purple-50 dark:bg-purple-950/40 border border-purple-100 dark:border-purple-900/60">
-              <span className="text-xs text-purple-700 dark:text-purple-300 font-bold uppercase block">Placement Tier</span>
-              <span className="text-2xl font-extrabold text-purple-900 dark:text-purple-100">Tier 1 Ready</span>
+              <span className="text-xs text-purple-700 dark:text-purple-300 font-bold uppercase block">Assessment Status</span>
+              <span className="text-2xl font-extrabold text-purple-900 dark:text-purple-100">{(finalPercent ?? 0) >= 70 ? 'Passed' : 'Review'}</span>
             </div>
           </div>
 
@@ -300,7 +289,7 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
           </div>
 
           <span className="hidden sm:inline text-[11px] text-slate-400">
-            Auto-saved: {autoSavedTime}
+            Your attempt is recorded when you submit.
           </span>
 
           <button
@@ -535,19 +524,23 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
               </div>
             </div>
 
+            {submissionError && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{submissionError}</p>}
+
             <div className="flex items-center justify-end gap-3 pt-2">
               <button
                 onClick={() => setShowSubmitModal(false)}
+                disabled={isSavingSubmission}
                 className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
               >
                 Continue Test
               </button>
               <button
                 id="confirm-final-submit-btn"
-                onClick={handleSubmitAssessment}
-                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-md cursor-pointer"
+                onClick={() => void handleSubmitAssessment()}
+                disabled={isSavingSubmission}
+                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-md cursor-pointer disabled:opacity-60"
               >
-                Confirm & Submit
+                {isSavingSubmission ? 'Saving attempt…' : 'Confirm & Submit'}
               </button>
             </div>
           </div>

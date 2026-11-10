@@ -2,7 +2,6 @@ export interface AiRecommendationResponse {
   recommendation: string;
   generatedByAI: boolean;
 }
-
 export interface AiPredictionResponse {
   readinessTier: 'High' | 'Moderate' | 'Needs Attention';
   probabilityTCSDigital: number;
@@ -214,7 +213,50 @@ export async function fetchNotifications(): Promise<any[]> {
   return await res.json();
 }
 
-export async function updateStudentRemarks(studentId: string, params: { remark: any; score: number; type: 'tech' | 'hr' }): Promise<any> {
+export async function fetchWorkspaceLeaderboard(): Promise<any[]> {
+  const res = await fetch('/api/leaderboard');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+export const fetchWorkspaceAssessments = () => apiRequest<Assessment[]>('/api/assessments');
+
+export function createWorkspaceAssessment(params: { sourceAssessmentId: string; title: string; status: Assessment['status']; scheduledDate: string; dayNumber?: number; durationMinutes?: number; purpose?: string; batchId?: string | null }) {
+  return apiRequest<Assessment>('/api/assessments', { method: 'POST', body: JSON.stringify(params) });
+}
+
+export function updateWorkspaceAssessment(id: string, params: Partial<Pick<Assessment, 'title' | 'dayNumber' | 'durationMinutes' | 'purpose' | 'status' | 'scheduledDate'>> & { batchId?: string | null }) {
+  return apiRequest<Assessment>(`/api/assessments/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(params) });
+}
+
+export function archiveWorkspaceAssessment(id: string) {
+  return apiRequest<{ success: boolean }>(`/api/assessments/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function submitWorkspaceAssessment(id: string, params: { answers: Record<number, number>; codingScores: Record<number, number>; timeSpentSeconds: number }) {
+  return apiRequest<{ id: string; score: number; totalMarks: number; percentage: number; passed: boolean; timeSpentSeconds: number }>(
+    `/api/assessments/${encodeURIComponent(id)}/submissions`,
+    { method: 'POST', body: JSON.stringify(params) },
+  );
+}
+
+export const fetchMyAssessmentAttempts = () => apiRequest<any[]>('/api/assessments/submissions/mine');
+
+export const fetchStudentInterviewHistory = (studentId: string) => apiRequest<any[]>(`/api/students/${encodeURIComponent(studentId)}/interviews`);
+
+export function createWorkspaceBatch(params: { name: string; trainerUserId?: string; startDate: string; completionDate: string; currentDay?: number }) {
+  return apiRequest<{ success: boolean; id: string }>('/api/batches', { method: 'POST', body: JSON.stringify(params) });
+}
+
+export function updateWorkspaceBatch(id: string, params: { name?: string; trainerUserId?: string | null; startDate?: string; completionDate?: string; currentDay?: number; isArchived?: boolean }) {
+  return apiRequest<{ success: boolean }>(`/api/batches/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(params) });
+}
+
+export function updateWorkspaceStudent(studentId: string, params: { batchId: string | null }) {
+  return apiRequest<{ success: boolean }>(`/api/workspace/students/${encodeURIComponent(studentId)}`, { method: 'PATCH', body: JSON.stringify(params) });
+}
+
+export async function updateStudentRemarks(studentId: string, params: { remark: any; score: number; type: 'tech' | 'hr'; ratings: Record<string, number>; recommendation: 'hire' | 'borderline' | 'remedial' }): Promise<any> {
   const res = await fetch(`/api/students/${studentId}/remarks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -223,3 +265,15 @@ export async function updateStudentRemarks(studentId: string, params: { remark: 
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
 }
+import { Assessment } from '../types';
+
+async function apiRequest<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data as T;
+}
+

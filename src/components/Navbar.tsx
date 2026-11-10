@@ -6,17 +6,17 @@ import {
   Sun,
   Moon,
   ChevronDown,
-  UserCheck,
-  ShieldCheck,
-  Code2,
   Menu,
   X,
+  LogOut,
 } from 'lucide-react';
 import { StudentProfile, UserRole } from '../types';
+import { AuthenticatedSession } from '../types/auth';
 
 interface NavbarProps {
   currentRole: UserRole;
-  onSelectRole: (role: UserRole) => void;
+  session: AuthenticatedSession;
+  onSignOut: () => void;
   students: StudentProfile[];
   selectedStudent: StudentProfile;
   onSelectStudent: (student: StudentProfile) => void;
@@ -31,7 +31,8 @@ interface NavbarProps {
 
 export const Navbar: React.FC<NavbarProps> = ({
   currentRole,
-  onSelectRole,
+  session,
+  onSignOut,
   students,
   selectedStudent,
   onSelectStudent,
@@ -87,48 +88,8 @@ export const Navbar: React.FC<NavbarProps> = ({
           </span>
         </div>
 
-        {/* Role Switcher Pills */}
-        <div className="hidden lg:flex items-center p-0.5 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
-          <button
-            id="role-btn-student"
-            onClick={() => onSelectRole('student')}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
-              currentRole === 'student'
-                ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-xs font-semibold'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            <Code2 className="w-3.5 h-3.5" />
-            <span>Student</span>
-          </button>
-          <button
-            id="role-btn-trainer"
-            onClick={() => onSelectRole('trainer')}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
-              currentRole === 'trainer'
-                ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-xs font-semibold'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            <UserCheck className="w-3.5 h-3.5" />
-            <span>Trainer</span>
-          </button>
-          <button
-            id="role-btn-admin"
-            onClick={() => onSelectRole('admin')}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
-              currentRole === 'admin'
-                ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-xs font-semibold'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Admin</span>
-          </button>
-        </div>
-
-        {/* Candidate Switcher Dropdown (Student mode) */}
-        {currentRole === 'student' && (
+        {/* Candidate switcher for authorized workspace staff */}
+        {currentRole !== 'student' && students.length > 0 && (
           <div className="relative hidden md:block">
             <select
               id="student-switcher-select"
@@ -183,29 +144,20 @@ export const Navbar: React.FC<NavbarProps> = ({
           {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4" />}
         </button>
 
-        {/* User Profile Info */}
+        {/* Authenticated user and sign out */}
         <div className="flex items-center space-x-2.5 border-l border-slate-200 dark:border-slate-800 pl-3 sm:pl-4">
           <div className="text-right hidden sm:block leading-tight">
             <div className="text-xs font-bold text-slate-900 dark:text-white">
-              {currentRole === 'admin'
-                ? 'Dr. Sarah Jenkins'
-                : currentRole === 'trainer'
-                ? 'Prof. Rajesh Sharma'
-                : selectedStudent.name}
+              {session.user.name}
             </div>
-            <div className="text-[10px] text-slate-500 dark:text-slate-400">
-              {currentRole === 'admin'
-                ? 'Lead Placement Officer'
-                : currentRole === 'trainer'
-                ? 'Senior Technical Lead'
-                : `Candidate • ${selectedStudent.rollNo}`}
-            </div>
+            <div className="max-w-36 truncate text-[10px] text-slate-500 dark:text-slate-400">{session.workspace.name}</div>
           </div>
           <img
-            src={selectedStudent.photo}
-            alt="Profile avatar"
+            src={session.user.avatar || selectedStudent?.photo}
+            alt="Account avatar"
             className="h-8 w-8 rounded-full bg-slate-200 border-2 border-white dark:border-slate-800 shadow-xs object-cover"
           />
+          <button onClick={onSignOut} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-rose-600 dark:hover:bg-slate-800" title="Sign out" aria-label="Sign out"><LogOut className="h-4 w-4" /></button>
         </div>
       </div>
     </header>

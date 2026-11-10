@@ -20,8 +20,18 @@ async function seed() {
   });
 
   try {
+    const [workspaceRows]: any = await connection.query('SELECT id FROM Workspaces ORDER BY createdAt LIMIT 1');
+    if (!workspaceRows.length) throw new Error('No workspace found. Run npm run db:migrate-auth first.');
+    const workspaceId = workspaceRows[0].id;
     console.log('Cleaning existing tables...');
     await connection.query('SET FOREIGN_KEY_CHECKS = 0');
+    await connection.query('TRUNCATE TABLE WorkspaceInvitations');
+    await connection.query('TRUNCATE TABLE WorkspacePasswordResets');
+    await connection.query('TRUNCATE TABLE AuthSessions');
+    await connection.query('TRUNCATE TABLE WorkspaceAuditEvents');
+    await connection.query('TRUNCATE TABLE WorkspaceBatchAssignments');
+    await connection.query('TRUNCATE TABLE WorkspaceStudentProfiles');
+    await connection.query('TRUNCATE TABLE WorkspaceMemberships');
     await connection.query('TRUNCATE TABLE StudentProfiles');
     await connection.query('TRUNCATE TABLE Users');
     await connection.query('TRUNCATE TABLE Batches');
@@ -31,9 +41,9 @@ async function seed() {
     console.log('Seeding batches...');
     for (const batch of DEMO_BATCHES) {
       await connection.execute(
-        `INSERT INTO Batches (id, name, college, trainer, totalStudents, readyCount, atRiskCount, averageScore, currentDay, startDate, completionDate, attendanceRate)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE name=VALUES(name), college=VALUES(college), trainer=VALUES(trainer)`,
+        `INSERT INTO Batches (id, name, college, trainer, totalStudents, readyCount, atRiskCount, averageScore, currentDay, startDate, completionDate, attendanceRate, workspaceId)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE name=VALUES(name), college=VALUES(college), trainer=VALUES(trainer), workspaceId=VALUES(workspaceId)`,
         [
           batch.id,
           batch.name,
@@ -46,7 +56,8 @@ async function seed() {
           batch.currentDay,
           batch.startDate,
           batch.completionDate,
-          batch.attendanceRate
+          batch.attendanceRate,
+          workspaceId,
         ]
       );
     }
@@ -73,6 +84,10 @@ async function seed() {
           u.trainerName || null
         ]
       );
+      await connection.execute(
+        'INSERT INTO WorkspaceMemberships (id, workspaceId, userId, role) VALUES (?, ?, ?, ?) ',
+        [`seed-membership-${u.id}`, workspaceId, u.id, u.role === 'admin' ? 'college_admin' : u.role],
+      );
     }
 
     console.log('Seeding student profiles...');
@@ -96,6 +111,10 @@ async function seed() {
           student.batch ? 'batch-1' : null,
           student.trainer
         ]
+      );
+      await connection.execute(
+        `INSERT INTO WorkspaceMemberships (id, workspaceId, userId, role) VALUES (?, ?, ?, 'student')`,
+        [`seed-membership-${student.id}`, workspaceId, student.id],
       );
 
       await connection.execute(
@@ -127,7 +146,54 @@ async function seed() {
           student.batch ? 'batch-1' : null
         ]
       );
+      await connection.execute(
+        `INSERT INTO WorkspaceStudentProfiles (
+          workspaceId, userId, rollNo, phone, college, department, branch, trainerName,
+          attendancePercent, currentDay, overallProgressPercent, placementReadinessScore,
+          coding, aptitude, reasoning, sqlScore, csFundamentals, communication, techInterview, hrInterview, overallReadiness,
+          eligibilityJson, weakAreasJson, strengthsJson, recentRemarksJson, batchId
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE batchId=VALUES(batchId), placementReadinessScore=VALUES(placementReadinessScore)`,
+        [
+          workspaceId,
+          student.id,
+          student.rollNo,
+          student.phone,
+          student.college,
+          student.department,
+          student.branch,
+          student.trainer,
+          student.attendancePercent,
+          student.currentDay,
+          student.overallProgressPercent,
+          student.placementReadinessScore,
+          student.metrics.coding,
+          student.metrics.aptitude,
+          student.metrics.reasoning,
+          student.metrics.sql,
+          student.metrics.csFundamentals,
+          student.metrics.communication,
+          student.metrics.techInterview,
+          student.metrics.hrInterview,
+          student.metrics.overallReadiness,
+          JSON.stringify(student.eligibility),
+          JSON.stringify(student.weakAreas),
+          JSON.stringify(student.strengths),
+          JSON.stringify(student.recentRemarks),
+          student.batch ? 'batch-1' : null,
+        ],
+      );
     }
+
+    await connection.query(
+      `INSERT IGNORE INTO WorkspaceBatchAssignments (workspaceId, batchId, trainerUserId)
+       SELECT b.workspaceId, b.id, u.id
+       FROM Batches b
+       JOIN Users u ON LOWER(TRIM(u.name)) = LOWER(TRIM(b.trainer))
+       JOIN WorkspaceMemberships wm ON wm.workspaceId = b.workspaceId AND wm.userId = u.id AND wm.role = 'trainer'
+       WHERE b.workspaceId = ?`,
+      [workspaceId],
+    );
 
     const mockNotifications = [
       {
@@ -156,10 +222,10 @@ async function seed() {
     console.log('Seeding notifications...');
     for (const notif of mockNotifications) {
       await connection.execute(
-        `INSERT INTO Notifications (id, title, time, \`desc\`, unread)
-         VALUES (?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE title=VALUES(title)`,
-        [notif.id, notif.title, notif.time, notif.desc, notif.unread]
+        `INSERT INTO Notifications (id, title, time, \`desc\`, unread, workspaceId)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE title=VALUES(title), workspaceId=VALUES(workspaceId)`,
+        [notif.id, notif.title, notif.time, notif.desc, notif.unread, workspaceId]
       );
     }
 

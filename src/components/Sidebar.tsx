@@ -15,6 +15,7 @@ import {
   Layers,
   Sparkles,
   ChevronRight,
+  Building2,
 } from 'lucide-react';
 import { UserRole } from '../types';
 
@@ -46,6 +47,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           { id: 'analytics', label: 'Institutional Analytics', icon: BarChart3 },
           { id: 'reports', label: 'Reports & Export', icon: FileText },
           { id: 'settings', label: 'System Settings', icon: Sliders },
+          { id: 'workspace', label: 'Workspace Members', icon: Building2 },
         ];
       case 'trainer':
         return [

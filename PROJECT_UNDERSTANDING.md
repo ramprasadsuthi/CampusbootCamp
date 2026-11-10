@@ -43,7 +43,7 @@ TalentEdge is a full-stack web portal for a 40-day campus placement-readiness bo
 
 | File | Purpose |
 | --- | --- |
-| `src/App.tsx` | App state, role and navigation switching, data loading, and page composition |
+| `src/App.tsx` | Authenticated app state, workspace navigation, data loading, and page composition |
 | `src/components/` | Dashboard, curriculum, assessment, interview, analytics, batch, profile, and modal UI |
 | `src/data/` | Demo student, curriculum, and assessment datasets |
 | `src/types.ts` | Shared TypeScript domain types |
@@ -53,4 +53,12 @@ TalentEdge is a full-stack web portal for a 40-day campus placement-readiness bo
 | `seed-mysql.ts` | Demo database population script |
 | `src/utils/pdfGenerator.ts` | PDF and CSV export helpers |
 | `Campus Placement Assessment Portal.docx` | Supplied architecture and feature brief |
+| `PRODUCT_SCOPE.md` | Stage 1 product roles, proposed subscription tiers, base release scope, and open commercial decisions |
+| `src/types/subscriptions.ts` | Initial typed plan, entitlement, limit, and subscription contracts; not yet enforced by the app |
+| `migrate-auth.ts` | Idempotent local MySQL migration for workspace memberships, invitations, sessions, audit events, and batch assignments |
+| `LOCAL_SETUP.md` | Local database migration, demo seed, and first administrator setup instructions |
+
+## Stage 3 implementation status
+
+The local app now has email/password sign-in, database-backed sessions, first-admin setup, optional college workspace registration, member invitations and password reset links, college-admin member activation controls, and workspace audit events. Authenticated role membership now drives the UI; students see their own profile, trainers are scoped to assigned batches, and college admins see workspace data. Workspace notifications and leaderboard data are also loaded through tenant-scoped API routes. These features require the `npm run db:migrate-auth` migration before the server can provide authenticated data routes.
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Trophy,
   Medal,
@@ -9,13 +9,22 @@ import {
   MessageSquare,
   TrendingUp,
 } from 'lucide-react';
-import { LEADERBOARD_ENTRIES } from '../data/mockData';
 import { LeaderboardEntry } from '../types';
+import { fetchWorkspaceLeaderboard } from '../services/api';
 
 export const LeaderboardView: React.FC = () => {
   const [filterCategory, setFilterCategory] = useState<'overall' | 'coding' | 'aptitude' | 'communication'>('overall');
+  const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const sortedEntries = [...LEADERBOARD_ENTRIES].sort((a, b) => {
+  useEffect(() => {
+    fetchWorkspaceLeaderboard()
+      .then(setEntries)
+      .catch((error) => console.error('Failed to load workspace leaderboard:', error))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const sortedEntries = [...entries].sort((a, b) => {
     if (filterCategory === 'coding') return b.codingScore - a.codingScore;
     if (filterCategory === 'aptitude') return b.aptitudeScore - a.aptitudeScore;
     if (filterCategory === 'communication') return b.communicationScore - a.communicationScore;
@@ -67,6 +76,7 @@ export const LeaderboardView: React.FC = () => {
       </div>
 
       {/* Top 3 Podium Cards */}
+      {loading ? <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">Loading workspace rankings…</div> : sortedEntries.length === 0 ? <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">No ranked students are available in this workspace or batch yet.</div> : <>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {sortedEntries.slice(0, 3).map((entry, idx) => {
           const isFirst = idx === 0;
@@ -134,6 +144,7 @@ export const LeaderboardView: React.FC = () => {
           );
         })}
       </div>
+      </>}
 
       {/* Full Leaderboard Table */}
       <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs">

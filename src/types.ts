@@ -158,6 +158,7 @@ export interface StudentProfile {
   department: string;
   branch: string;
   batch: string;
+  batchId?: string | null;
   trainer: string;
   attendancePercent: number;
   currentDay: number;
@@ -265,6 +266,7 @@ export interface BatchInfo {
   college: string;
   department: string;
   trainer: string;
+  trainerUserId?: string | null;
   totalStudents: number;
   activeStudents: number;
   avgAttendance: number;

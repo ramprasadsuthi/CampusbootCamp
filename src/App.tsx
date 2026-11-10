@@ -13,10 +13,13 @@ import { BatchManager } from './components/BatchManager';
 import { LeaderboardView } from './components/LeaderboardView';
 import { CertificateModal } from './components/CertificateModal';
 import { AiInsightsModal } from './components/AiInsightsModal';
-import { SAMPLE_STUDENTS } from './data/mockData';
-import { fetchStudents, updateStudentRemarks } from './services/api';
+import { AuthScreen } from './components/AuthScreen';
+import { WorkspaceMembers } from './components/WorkspaceMembers';
+import { archiveWorkspaceAssessment, createWorkspaceAssessment, createWorkspaceBatch, fetchBatches, fetchNotifications, fetchStudents, fetchWorkspaceAssessments, updateStudentRemarks, updateWorkspaceAssessment, updateWorkspaceBatch, updateWorkspaceStudent } from './services/api';
+import { getCurrentSession, getWorkspaceTrainers, signOut } from './services/auth';
 import { generateStudentReportPDF, exportBatchCSV } from './utils/pdfGenerator';
-import { StudentProfile, UserRole } from './types';
+import { BatchInfo, StudentProfile, UserRole } from './types';
+import { AuthenticatedSession } from './types/auth';
 import {
   Bell,
   CheckCircle2,
@@ -28,52 +31,113 @@ import {
   Award,
 } from 'lucide-react';
 
+const EMPTY_STUDENT: StudentProfile = {
+  id: '',
+  name: 'No students enrolled yet',
+  email: '',
+  rollNo: '',
+  phone: '',
+  photo: '',
+  college: '',
+  department: '',
+  branch: '',
+  batch: '',
+  trainer: '',
+  attendancePercent: 0,
+  currentDay: 0,
+  overallProgressPercent: 0,
+  placementReadinessScore: 0,
+  metrics: { coding: 0, aptitude: 0, reasoning: 0, sql: 0, csFundamentals: 0, communication: 0, techInterview: 0, hrInterview: 0, overallReadiness: 0 },
+  eligibility: [],
+  weakAreas: [],
+  strengths: [],
+  recentRemarks: [],
+};
+
 export default function App() {
-  const [currentRole, setCurrentRole] = useState<UserRole>('student');
+  const [session, setSession] = useState<AuthenticatedSession | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string>('dashboard');
-  const [students, setStudents] = useState<StudentProfile[]>(SAMPLE_STUDENTS);
-  const [selectedStudent, setSelectedStudent] = useState<StudentProfile>(SAMPLE_STUDENTS[0]);
+  const [students, setStudents] = useState<StudentProfile[]>([]);
+  const [batches, setBatches] = useState<BatchInfo[]>([]);
+  const [trainers, setTrainers] = useState<Array<{ id: string; name: string; email: string }>>([]);
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const [assessments, setAssessments] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [selectedStudent, setSelectedStudent] = useState<StudentProfile>(EMPTY_STUDENT);
   const [darkMode, setDarkMode] = useState<boolean>(false);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [activeAssessmentId, setActiveAssessmentId] = useState<string | null>(null);
   const [showAiModal, setShowAiModal] = useState<boolean>(false);
   const [showNotifications, setShowNotifications] = useState<boolean>(false);
 
-  const notifications = [
-    {
-      id: 'n1',
-      title: 'Day 40 Final Placement Simulation Live',
-      time: '10 minutes ago',
-      desc: '3-Hour capstone test is now active for all batches.',
-      unread: true,
-    },
-    {
-      id: 'n2',
-      title: 'TCS NQT Drive Benchmark Updated',
-      time: '1 hour ago',
-      desc: 'Your coding score (92%) qualifies for TCS Digital shortlist.',
-      unread: true,
-    },
-    {
-      id: 'n3',
-      title: 'Technical Mock Interview Scheduled',
-      time: 'Yesterday',
-      desc: 'Panel session completed with Prof. Rajesh Sharma. Score: 88%.',
-      unread: false,
-    },
-  ];
+  const currentRole: UserRole = session?.role === 'college_admin' ? 'admin' : session?.role || 'student';
 
-  // Fetch students from MySQL on component mount
   useEffect(() => {
-    fetchStudents()
-      .then((data) => {
-        if (data && data.length > 0) {
-          setStudents(data);
-          setSelectedStudent(data[0]);
-        }
-      })
-      .catch((err) => console.error('Failed to fetch students from DB:', err));
+    getCurrentSession()
+      .then(setSession)
+      .catch(() => setSession(null))
+      .finally(() => setAuthLoading(false));
   }, []);
+
+  // Load only the profiles permitted by the active workspace membership.
+  useEffect(() => {
+    if (!session) {
+      setStudents([]);
+      setBatches([]);
+      setTrainers([]);
+      setAssessments([]);
+      setNotifications([]);
+      setSelectedStudent(EMPTY_STUDENT);
+      return;
+    }
+    Promise.all([fetchStudents(), fetchBatches(), fetchNotifications(), fetchWorkspaceAssessments(), currentRole === 'admin' ? getWorkspaceTrainers() : Promise.resolve([])])
+      .then(([data, batchData, notificationData, assessmentData, trainerData]) => {
+        const profiles = Array.isArray(data) ? data : [];
+        setStudents(profiles);
+        setSelectedStudent((current) => profiles.find((student: StudentProfile) => student.id === current.id) || profiles[0] || EMPTY_STUDENT);
+        const scopedBatches = Array.isArray(batchData) ? batchData : [];
+        setBatches(scopedBatches.map((batch: any) => ({
+          id: batch.id,
+          name: batch.name,
+          college: batch.college,
+          department: '',
+          trainer: batch.trainer,
+          trainerUserId: batch.trainerUserId || null,
+          totalStudents: Number(batch.totalStudents || 0),
+          activeStudents: Number(batch.totalStudents || 0),
+          avgAttendance: Number(batch.attendanceRate || 0),
+          avgReadiness: Number(batch.averageScore || 0),
+          tier1ReadyPercent: batch.totalStudents ? Math.round((Number(batch.readyCount || 0) / Number(batch.totalStudents)) * 100) : 0,
+          tier2ReadyPercent: 0,
+          atRiskPercent: batch.totalStudents ? Math.round((Number(batch.atRiskCount || 0) / Number(batch.totalStudents)) * 100) : 0,
+          startDate: batch.startDate,
+          endDate: batch.completionDate,
+        })));
+        setNotifications(Array.isArray(notificationData) ? notificationData : []);
+        setAssessments(Array.isArray(assessmentData) ? assessmentData : []);
+        setTrainers(Array.isArray(trainerData) ? trainerData : []);
+      })
+      .catch((err) => {
+        console.error('Failed to fetch workspace students:', err);
+        if (err instanceof Error && err.message.includes('401')) setSession(null);
+      });
+  }, [session?.workspace.id, session?.user.id, refreshRevision, currentRole]);
+
+  const handleCreateBatch = async (params: { name: string; trainerUserId?: string; startDate: string; completionDate: string }) => {
+    await createWorkspaceBatch(params);
+    setRefreshRevision((value) => value + 1);
+  };
+
+  const handleUpdateBatch = async (id: string, params: { name?: string; trainerUserId?: string | null; startDate?: string; completionDate?: string; currentDay?: number; isArchived?: boolean }) => {
+    await updateWorkspaceBatch(id, params);
+    setRefreshRevision((value) => value + 1);
+  };
+
+  const handleAssignStudent = async (studentId: string, batchId: string | null) => {
+    await updateWorkspaceStudent(studentId, { batchId });
+    setRefreshRevision((value) => value + 1);
+  };
 
   // Dark mode effect
   useEffect(() => {
@@ -84,16 +148,44 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Handle role switch defaults
-  const handleSelectRole = (role: UserRole) => {
-    setCurrentRole(role);
-    setActiveTab('dashboard');
+  const handleAuthenticated = () => {
+    setAuthLoading(true);
+    getCurrentSession()
+      .then((currentSession) => {
+        setSession(currentSession);
+        setActiveTab('dashboard');
+      })
+      .catch(() => setSession(null))
+      .finally(() => setAuthLoading(false));
+  };
+
+  const handleSignOut = async () => {
+    await signOut().catch(() => undefined);
+    setSession(null);
+    setActiveAssessmentId(null);
+    setShowAiModal(false);
+    setShowNotifications(false);
+  };
+
+  const handleCreateAssessment = async (params: Parameters<typeof createWorkspaceAssessment>[0]) => {
+    const assessment = await createWorkspaceAssessment(params);
+    setAssessments((current) => [...current, assessment].sort((a, b) => a.dayNumber - b.dayNumber));
+  };
+
+  const handleUpdateAssessment = async (id: string, params: Parameters<typeof updateWorkspaceAssessment>[1]) => {
+    const assessment = await updateWorkspaceAssessment(id, params);
+    setAssessments((current) => current.map((item) => item.id === id ? assessment : item));
+  };
+
+  const handleArchiveAssessment = async (id: string) => {
+    await archiveWorkspaceAssessment(id);
+    setAssessments((current) => current.filter((item) => item.id !== id));
   };
 
   // Handle remarks update from InterviewPanel calling MySQL Backend
-  const handleUpdateRemarks = async (studentId: string, remark: any, newScore: number) => {
+  const handleUpdateRemarks = async (studentId: string, remark: any, newScore: number, evaluation: { ratings: Record<string, number>; recommendation: 'hire' | 'borderline' | 'remedial' }) => {
     try {
-      const response = await updateStudentRemarks(studentId, { remark, score: newScore, type: remark.type });
+      const response = await updateStudentRemarks(studentId, { remark, score: newScore, type: remark.type, ...evaluation });
       
       setStudents((prev) =>
         prev.map((st) => {
@@ -120,12 +212,16 @@ export default function App() {
       );
     } catch (error) {
       console.error('Failed to update student remarks on server:', error);
+      throw error;
     }
   };
 
   // Render view based on active tab and role
   const renderContent = () => {
     switch (activeTab) {
+      case 'workspace':
+        return session ? <WorkspaceMembers session={session} /> : null;
+
       case 'dashboard':
         return (
           <DashboardLanding
@@ -148,7 +244,13 @@ export default function App() {
       case 'assessments':
         return (
           <AssessmentList
+            assessments={assessments}
+            batches={batches}
+            canManage={currentRole !== 'student'}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
+            onCreateAssessment={handleCreateAssessment}
+            onUpdateAssessment={handleUpdateAssessment}
+            onArchiveAssessment={handleArchiveAssessment}
           />
         );
 
@@ -171,6 +273,7 @@ export default function App() {
             students={students}
             initialType="tech"
             onUpdateStudentRemarks={handleUpdateRemarks}
+            evaluatorName={session.user.name}
           />
         );
 
@@ -180,6 +283,7 @@ export default function App() {
             students={students}
             initialType="hr"
             onUpdateStudentRemarks={handleUpdateRemarks}
+            evaluatorName={session.user.name}
           />
         );
 
@@ -191,6 +295,12 @@ export default function App() {
         return (
           <BatchManager
             students={students}
+            batches={batches}
+            trainers={trainers}
+            canManage={currentRole === 'admin'}
+            onCreateBatch={handleCreateBatch}
+            onUpdateBatch={handleUpdateBatch}
+            onAssignStudent={handleAssignStudent}
             onSelectStudent={(st) => setSelectedStudent(st)}
             onNavigateToProfile={() => setActiveTab('student_profile')}
           />
@@ -302,11 +412,21 @@ export default function App() {
     }
   };
 
+  if (authLoading) {
+    return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-sm font-medium text-slate-500">Loading your secure workspace…</div>;
+  }
+
+  if (!session) {
+    return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  }
+
   // If in active assessment, render full-screen AssessmentPlayer
   if (activeAssessmentId) {
+    const assessment = assessments.find((item) => item.id === activeAssessmentId);
+    if (!assessment) return <div className="min-h-screen flex items-center justify-center text-sm text-slate-500">Loading assessment…</div>;
     return (
       <AssessmentPlayer
-        assessmentId={activeAssessmentId}
+        assessment={assessment}
         student={selectedStudent}
         onClose={() => setActiveAssessmentId(null)}
       />
@@ -318,7 +438,8 @@ export default function App() {
       {/* Top Navbar */}
       <Navbar
         currentRole={currentRole}
-        onSelectRole={handleSelectRole}
+        session={session}
+        onSignOut={handleSignOut}
         students={students}
         selectedStudent={selectedStudent}
         onSelectStudent={(s) => setSelectedStudent(s)}
@@ -326,7 +447,7 @@ export default function App() {
         onToggleDarkMode={() => setDarkMode(!darkMode)}
         onOpenAiInsights={() => setShowAiModal(true)}
         onOpenNotifications={() => setShowNotifications(!showNotifications)}
-        unreadNotifsCount={2}
+        unreadNotifsCount={notifications.filter((notification) => notification.unread).length}
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
       />

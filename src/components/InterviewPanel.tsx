@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Code,
   User,
@@ -13,54 +13,70 @@ import {
   GraduationCap,
 } from 'lucide-react';
 import { StudentProfile } from '../types';
+import { fetchStudentInterviewHistory } from '../services/api';
 
 interface InterviewPanelProps {
   students: StudentProfile[];
   initialType?: 'tech' | 'hr';
-  onUpdateStudentRemarks: (studentId: string, remark: any, newScore: number) => void;
+  onUpdateStudentRemarks: (studentId: string, remark: any, newScore: number, evaluation: { ratings: Record<string, number>; recommendation: 'hire' | 'borderline' | 'remedial' }) => Promise<void>;
+  evaluatorName: string;
 }
 
 export const InterviewPanel: React.FC<InterviewPanelProps> = ({
   students,
   initialType = 'tech',
   onUpdateStudentRemarks,
+  evaluatorName,
 }) => {
   const [interviewType, setInterviewType] = useState<'tech' | 'hr'>(initialType);
   const [selectedStudentId, setSelectedStudentId] = useState<string>(students[0]?.id || 'std-1');
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [interviewHistory, setInterviewHistory] = useState<any[]>([]);
 
   // Technical interview criteria scores (out of 10)
   const [techScores, setTechScores] = useState({
-    coding: 9,
-    sql: 8,
-    oop: 9,
-    projects: 8,
-    problemSolving: 9,
-    communication: 8,
+    coding: 5,
+    sql: 5,
+    oop: 5,
+    projects: 5,
+    problemSolving: 5,
+    communication: 5,
   });
 
   // HR interview criteria scores (out of 10)
   const [hrScores, setHrScores] = useState({
-    resumeReview: 9,
-    confidence: 8,
-    communication: 9,
-    behavioralStar: 8,
-    leadership: 8,
-    teamwork: 9,
-    adaptability: 9,
+    resumeReview: 5,
+    confidence: 5,
+    communication: 5,
+    behavioralStar: 5,
+    leadership: 5,
+    teamwork: 5,
+    adaptability: 5,
   });
 
-  const [remarks, setRemarks] = useState<string>(
-    interviewType === 'tech'
-      ? 'Exceptional clarity in Two-Pointer and Dynamic Programming algorithms. Structured approach with optimal space/time complexity explanations.'
-      : 'Articulate storytelling using the STAR framework. Demonstrated great teamwork in capstone project. Recommended for Tier 1 roles.'
-  );
+  const [remarks, setRemarks] = useState<string>('');
 
-  const [verdict, setVerdict] = useState<'hire' | 'borderline' | 'remedial'>('hire');
+  const [verdict, setVerdict] = useState<'hire' | 'borderline' | 'remedial'>('borderline');
 
   const currentStudent = students.find((s) => s.id === selectedStudentId) || students[0];
 
-  const handleSaveEvaluation = () => {
+  useEffect(() => {
+    if (!currentStudent?.id) {
+      setInterviewHistory([]);
+      return;
+    }
+    fetchStudentInterviewHistory(currentStudent.id)
+      .then(setInterviewHistory)
+      .catch((error) => console.error('Failed to load interview history:', error));
+  }, [currentStudent?.id, savedSuccess]);
+
+  const handleSaveEvaluation = async () => {
+    if (!currentStudent?.id || !remarks.trim()) {
+      setSaveError('Select a student and enter interview feedback before saving.');
+      return;
+    }
     // Calculate aggregate score
     let totalScore = 0;
     if (interviewType === 'tech') {
@@ -71,22 +87,34 @@ export const InterviewPanel: React.FC<InterviewPanelProps> = ({
       totalScore = Math.round((vals.reduce((a: number, b: number) => a + b, 0) / (vals.length * 10)) * 100);
     }
 
-    onUpdateStudentRemarks(
-      currentStudent.id,
-      {
-        id: `rem-${Date.now()}`,
-        trainerName: 'Prof. Rajesh Sharma (Lead Panel)',
-        date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        comment: remarks,
-        type: interviewType,
-        score: totalScore,
-      },
-      totalScore
-    );
-
-    setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 3000);
+    setSaving(true);
+    setSaveError('');
+    try {
+      await onUpdateStudentRemarks(
+        currentStudent.id,
+        {
+          id: `rem-${Date.now()}`,
+          trainerName: evaluatorName,
+          date: new Date().toISOString().slice(0, 10),
+          comment: remarks.trim(),
+          type: interviewType,
+          score: totalScore,
+        },
+        totalScore,
+        { ratings: interviewType === 'tech' ? techScores : hrScores, recommendation: verdict },
+      );
+      setSavedSuccess(true);
+      window.setTimeout(() => setSavedSuccess(false), 3000);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Could not save the evaluation.');
+    } finally {
+      setSaving(false);
+    }
   };
+
+  if (!currentStudent) {
+    return <div className="rounded-3xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">No students are assigned to your accessible batches yet.</div>;
+  }
 
   return (
     <div className="space-y-6 animate-fadeIn">
@@ -363,16 +391,22 @@ export const InterviewPanel: React.FC<InterviewPanelProps> = ({
 
               <button
                 id="save-interview-eval-btn"
-                onClick={handleSaveEvaluation}
+                onClick={() => void handleSaveEvaluation()}
+                disabled={saving}
                 className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md transition-all cursor-pointer"
               >
                 <Save className="w-4 h-4" />
-                <span>Save Evaluation & Remarks</span>
+                <span>{saving ? 'Saving…' : 'Save Evaluation & Remarks'}</span>
               </button>
             </div>
+            {saveError && <p role="alert" className="text-xs font-semibold text-rose-600">{saveError}</p>}
           </div>
         </div>
       </div>
+      <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
+        <div className="border-b border-slate-100 p-5 dark:border-slate-800"><h2 className="font-bold text-slate-900 dark:text-white">Saved interview evaluations</h2><p className="mt-1 text-xs text-slate-500">History for {currentStudent.name} in this workspace.</p></div>
+        {interviewHistory.length === 0 ? <p className="p-5 text-sm text-slate-500">No saved evaluations yet.</p> : <div className="divide-y divide-slate-100 dark:divide-slate-800">{interviewHistory.map((record) => <article key={record.id} className="flex flex-col gap-2 p-5 sm:flex-row sm:items-start sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-bold uppercase text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">{record.type === 'tech' ? 'Technical' : 'HR'}</span><span className="text-xs font-semibold text-slate-700 dark:text-slate-200">{record.recommendation}</span><span className="text-[11px] text-slate-400">{record.date}</span></div><p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{record.remarks}</p><p className="mt-1 text-[11px] text-slate-400">Panel: {record.panel}</p></div><span className="shrink-0 text-lg font-extrabold text-indigo-600 dark:text-indigo-300">{record.score}%</span></article>)}</div>}
+      </section>
     </div>
   );
 };
