@@ -107,6 +107,10 @@ export interface Assessment {
   scheduledDate: string;
   sections: AssessmentSection[];
   targetCompanies: string[];
+  batchId?: string | null;
+  studentStatus?: 'not_started' | 'submitted';
+  studentAttemptCount?: number;
+  studentLastSubmittedAt?: string | null;
 }
 
 export interface AssessmentSubmission {

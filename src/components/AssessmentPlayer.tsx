@@ -140,9 +140,10 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
           calculatedMarks += mcq.marks;
         }
       } else if (item.question.type === 'coding') {
-        maxMarks += 30;
+        const codingMarks = Number((item.question.data as CodingProblem & { marks?: number }).marks || 30);
+        maxMarks += codingMarks;
         const codeScorePercent = codingScores[idx] ?? 0;
-        calculatedMarks += (codeScorePercent / 100) * 30;
+        calculatedMarks += (codeScorePercent / 100) * codingMarks;
       }
     });
 

@@ -26,7 +26,7 @@ TalentEdge is a full-stack web portal for a 40-day campus placement-readiness bo
 
 ## Data and backend flow
 
-- The frontend starts with sample profiles from `src/data/mockData.ts` and attempts to replace them with `/api/students` data when the server responds.
+- Student, batch, and assessment screens now load workspace-scoped records from the authenticated API. Demo profiles remain available only through the optional destructive seed script.
 - `server.ts` exposes health, students, batches, notifications, student-remark update, three AI, and code-run endpoints.
 - `talentEdge.sql` defines tables for batches, users, student profiles, interview records, assessments, submissions, and notifications. Complex profile properties such as eligibility and remarks are stored as JSON strings in text columns.
 - `seed-mysql.ts` inserts demo batches, users, student profiles, and notifications. It truncates the existing demo-related tables before reseeding, so it is a demo-data setup script rather than a non-destructive migration.
@@ -34,7 +34,7 @@ TalentEdge is a full-stack web portal for a 40-day campus placement-readiness bo
 
 ## Important implementation boundaries
 
-- The code-run endpoint is explicitly a **simulator**: it does not compile or execute submitted source code. It returns expected outputs for ordinary snippets and only changes behavior for specific marker strings. Client-side fallback behavior also reports all test cases as passing if the API request fails. Treat this as a UI/demo feature, not a secure or accurate online judge.
+- The code-run endpoint is a simulator: it does not compile or execute submitted source code. Client fallback behavior reports all test cases as passing if the API request fails. Treat it as demo behavior, not as an accurate or secure online judge.
 - Readiness probabilities and the non-AI recommendation/prediction paths are heuristic or static demo content, not validated placement outcome models.
 - The supplied brief describes a wider product vision than the persistence currently wired into the UI. The project is best understood as a feature-rich demo/prototype with selected MySQL-backed flows, not a fully integrated production placement system.
 - `prisma.config.ts` and the Prisma dependency appear to be tooling/configuration artifacts; the application data layer shown in the source uses direct MySQL queries rather than Prisma models.

@@ -57,28 +57,16 @@ const pool = mysql.createPool({
 
 async function ensureWorkspaceAssessments(db: any, workspaceId: string, createdByUserId: string | null = null) {
   const [existing]: any = await db.execute('SELECT id FROM Assessments WHERE workspaceId = ? LIMIT 1', [workspaceId]);
-  if (existing.length) return;
+  if (existing.length > 0) return;
   for (const assessment of ASSESSMENTS_CATALOG) {
     await db.execute(
       `INSERT INTO Assessments
        (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        `${workspaceId}:${assessment.id}`,
-        workspaceId,
-        assessment.dayNumber,
-        assessment.title,
-        assessment.type,
-        assessment.durationMinutes,
-        assessment.totalMarks,
-        JSON.stringify(assessment.coverage),
-        assessment.purpose,
-        assessment.status,
-        assessment.scheduledDate,
-        JSON.stringify(assessment.sections),
-        JSON.stringify(assessment.targetCompanies),
-        createdByUserId,
-      ],
+      [`${workspaceId}:${assessment.id}`, workspaceId, assessment.dayNumber, assessment.title, assessment.type,
+        assessment.durationMinutes, assessment.totalMarks, JSON.stringify(assessment.coverage), assessment.purpose,
+        assessment.status, assessment.scheduledDate, JSON.stringify(assessment.sections),
+        JSON.stringify(assessment.targetCompanies), createdByUserId],
     );
   }
 }
@@ -92,11 +80,15 @@ function serializeAssessment(row: any, hideAnswerKey = false) {
           delete question.data.correctIndex;
           delete question.data.explanation;
         }
+        if (question.type === 'coding' && question.data) {
+          question.data.testCases = (question.data.testCases || []).filter((testCase: any) => !testCase.hidden);
+        }
       }
     }
   }
+  const { sectionsJson: _sectionsJson, coverageJson: _coverageJson, targetCompaniesJson: _targetCompaniesJson, ...safeRow } = row;
   return {
-    ...row,
+    ...safeRow,
     coverage: JSON.parse(row.coverageJson || '[]'),
     sections,
     targetCompanies: JSON.parse(row.targetCompaniesJson || '[]'),
@@ -233,11 +225,11 @@ app.post('/api/auth/register-workspace', async (req, res) => {
       'INSERT INTO WorkspaceMemberships (id, workspaceId, userId, role) VALUES (?, ?, ?, \'college_admin\')',
       [randomUUID(), workspaceId, userId],
     );
+    await ensureWorkspaceAssessments(connection, workspaceId, userId);
     await connection.execute(
       'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, targetUserId) VALUES (?, ?, ?, ?, ?)',
       [randomUUID(), workspaceId, userId, 'workspace.registered', userId],
     );
-    await ensureWorkspaceAssessments(connection, workspaceId, userId);
     await connection.commit();
     await createSession(userId, workspaceId, res);
     res.status(201).json({ success: true });
@@ -296,11 +288,11 @@ app.post('/api/auth/bootstrap', async (req, res) => {
         'INSERT INTO WorkspaceMemberships (id, workspaceId, userId, role) VALUES (?, ?, ?, \'college_admin\')',
         [randomUUID(), workspaceId, userId],
       );
+      await ensureWorkspaceAssessments(connection, workspaceId, userId);
       await connection.execute(
         'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, targetUserId) VALUES (?, ?, ?, ?, ?)',
         [randomUUID(), workspaceId, userId, 'workspace.bootstrap.completed', userId],
       );
-      await ensureWorkspaceAssessments(connection, workspaceId, userId);
       await connection.commit();
       await createSession(userId, workspaceId, res);
       res.status(201).json({ success: true });
@@ -929,7 +921,24 @@ app.get('/api/assessments', async (req, res) => {
        ) ORDER BY a.dayNumber, a.title`,
       [auth.workspaceId, auth.role, auth.role, auth.userId, auth.role, auth.userId],
     );
-    res.json(rows.map((row: any) => serializeAssessment(row, auth.role === 'student')));
+    let attemptsByAssessment: Record<string, any> = {};
+    if (auth.role === 'student') {
+      const [attempts]: any = await pool.execute(
+        `SELECT assessmentId, COUNT(*) AS attemptCount, MAX(submittedAt) AS lastSubmittedAt
+         FROM Submissions WHERE workspaceId = ? AND studentId = ? GROUP BY assessmentId`,
+        [auth.workspaceId, auth.userId],
+      );
+      attemptsByAssessment = Object.fromEntries(attempts.map((attempt: any) => [attempt.assessmentId, attempt]));
+    }
+    res.json(rows.map((row: any) => {
+      const attempt = attemptsByAssessment[row.id];
+      return serializeAssessment({
+        ...row,
+        studentStatus: auth.role === 'student' ? (attempt ? 'submitted' : 'not_started') : undefined,
+        studentAttemptCount: attempt ? Number(attempt.attemptCount) : 0,
+        studentLastSubmittedAt: attempt?.lastSubmittedAt || null,
+      }, auth.role === 'student');
+    }));
   } catch (error) {
     console.error('Assessment catalog query failed:', error);
     res.status(500).json({ error: 'Could not load workspace assessments.' });
@@ -938,14 +947,49 @@ app.get('/api/assessments', async (req, res) => {
 
 app.post('/api/assessments', requireRole('college_admin', 'trainer'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
-  const { sourceAssessmentId, title, status, scheduledDate, batchId, dayNumber, durationMinutes, purpose } = req.body || {};
+  const { sourceAssessmentId, title, status, scheduledDate, batchId, dayNumber, durationMinutes, purpose, sections, coverage, type, targetCompanies } = req.body || {};
   if (typeof sourceAssessmentId !== 'string' || typeof title !== 'string' || title.trim().length < 3 || title.length > 191 || !['upcoming', 'live', 'completed'].includes(status) || typeof scheduledDate !== 'string' || scheduledDate.length > 191) {
     return res.status(400).json({ error: 'Choose a source assessment and provide a title, status, and scheduled date.' });
   }
   try {
-    const [sources]: any = await pool.execute('SELECT * FROM Assessments WHERE id = ? AND workspaceId = ? AND isArchived = 0 LIMIT 1', [sourceAssessmentId, auth.workspaceId]);
-    const source = sources[0];
+    let source: any = null;
+    if (sourceAssessmentId?.startsWith('template:')) {
+      source = ASSESSMENTS_CATALOG.find((item) => `template:${item.id}` === sourceAssessmentId) || null;
+      if (source) source = {
+        ...source,
+        sectionsJson: JSON.stringify(source.sections), coverageJson: JSON.stringify(source.coverage),
+        targetCompaniesJson: JSON.stringify(source.targetCompanies),
+      };
+    } else if (sourceAssessmentId) {
+      const [sources]: any = await pool.execute('SELECT * FROM Assessments WHERE id = ? AND workspaceId = ? AND isArchived = 0 LIMIT 1', [sourceAssessmentId, auth.workspaceId]);
+      source = sources[0] || null;
+    }
     if (!source) return res.status(404).json({ error: 'Source assessment not found in this workspace.' });
+    const parsedSections = sections === undefined ? (source ? JSON.parse(source.sectionsJson) : []) : sections;
+    if (!Array.isArray(parsedSections) || parsedSections.length < 1 || parsedSections.length > 20 || parsedSections.some((section: any) => !section || typeof section.name !== 'string' || !Array.isArray(section.questions) || section.questions.length > 100)) {
+      return res.status(400).json({ error: 'Add at least one valid section containing questions.' });
+    }
+    let computedMarks = 0;
+    let questionCount = 0;
+    let codingQuestionCount = 0;
+    for (const section of parsedSections) {
+      if (!section.id || !section.name.trim()) return res.status(400).json({ error: 'Every section needs an id and name.' });
+      for (const question of section.questions) {
+        questionCount += 1;
+        if (questionCount > 100) return res.status(400).json({ error: 'An assignment can contain at most 100 questions.' });
+        const data = question?.data;
+        if (question?.type === 'mcq') {
+          if (!data || typeof data.text !== 'string' || !data.text.trim() || !Array.isArray(data.options) || data.options.length < 2 || data.options.length > 8 || data.options.some((option: any) => typeof option !== 'string') || !Number.isInteger(data.correctIndex) || data.correctIndex < 0 || data.correctIndex >= data.options.length || !Number.isFinite(data.marks) || data.marks < 1 || data.marks > 100) return res.status(400).json({ error: 'Each multiple-choice question needs a prompt, 2–8 options, a correct option, and marks from 1 to 100.' });
+          computedMarks += data.marks;
+        } else if (question?.type === 'coding') {
+          codingQuestionCount += 1;
+          if (codingQuestionCount > 3) return res.status(400).json({ error: 'An assignment can contain at most 3 coding questions.' });
+          if (!data || typeof data.title !== 'string' || !data.title.trim() || typeof data.description !== 'string' || !data.description.trim() || !Array.isArray(data.testCases) || data.testCases.length < 1 || data.testCases.length > 10 || data.testCases.some((testCase: any) => typeof testCase.input !== 'string' || typeof testCase.expected !== 'string') || !Number.isFinite(data.marks ?? 30) || (data.marks ?? 30) < 1 || (data.marks ?? 30) > 100 || !data.templates || typeof data.templates !== 'object' || Object.values(data.templates).every((template: any) => typeof template !== 'string')) return res.status(400).json({ error: 'Each coding question needs instructions, 1–10 input/output test cases, at least one starter template, and valid marks.' });
+          computedMarks += data.marks ?? 30;
+        } else return res.status(400).json({ error: 'Question type must be multiple choice or coding.' });
+      }
+    }
+    if (!computedMarks) return res.status(400).json({ error: 'Add at least one question to the assignment.' });
     if (batchId) {
       const [batches]: any = await pool.execute('SELECT id FROM Batches WHERE id = ? AND workspaceId = ? AND isArchived = 0', [batchId, auth.workspaceId]);
       if (!batches.length) return res.status(400).json({ error: 'Choose a batch in this workspace.' });
@@ -954,12 +998,14 @@ app.post('/api/assessments', requireRole('college_admin', 'trainer'), async (req
         if (!assignments.length) return res.status(403).json({ error: 'You are not assigned to that batch.' });
       }
     }
+    const assessmentType = type || source?.type || 'technical';
+    if (!['diagnostic', 'coding_benchmark', 'aptitude', 'reasoning', 'communication', 'technical', 'sql', 'interview', 'placement_drive', 'final'].includes(assessmentType)) return res.status(400).json({ error: 'Choose a valid assessment type.' });
     const id = randomUUID();
     await pool.execute(
       `INSERT INTO Assessments
        (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId, batchId)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, auth.workspaceId, Number.isInteger(dayNumber) ? Math.max(1, Math.min(40, dayNumber)) : source.dayNumber, title.trim(), source.type, Number.isInteger(durationMinutes) ? Math.max(1, Math.min(600, durationMinutes)) : source.durationMinutes, source.totalMarks, source.coverageJson, typeof purpose === 'string' ? purpose.slice(0, 255) : source.purpose, status, scheduledDate, source.sectionsJson, source.targetCompaniesJson, auth.userId, batchId || null],
+      [id, auth.workspaceId, Number.isInteger(dayNumber) ? Math.max(1, Math.min(40, dayNumber)) : source?.dayNumber || 1, title.trim(), assessmentType, Number.isInteger(durationMinutes) ? Math.max(1, Math.min(600, durationMinutes)) : source?.durationMinutes || 60, computedMarks, JSON.stringify(Array.isArray(coverage) ? coverage.filter((item: any) => typeof item === 'string').slice(0, 50) : source ? JSON.parse(source.coverageJson) : []), typeof purpose === 'string' ? purpose.slice(0, 255) : source?.purpose || '', status, scheduledDate, JSON.stringify(parsedSections), JSON.stringify(Array.isArray(targetCompanies) ? targetCompanies.filter((item: any) => typeof item === 'string').slice(0, 50) : source ? JSON.parse(source.targetCompaniesJson) : []), auth.userId, batchId || null],
     );
     await pool.execute(
       'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
@@ -992,6 +1038,10 @@ app.patch('/api/assessments/:id', requireRole('college_admin', 'trainer'), async
     if (batchId !== undefined && batchId !== null) {
       const [batches]: any = await pool.execute('SELECT id FROM Batches WHERE id = ? AND workspaceId = ? AND isArchived = 0', [batchId, auth.workspaceId]);
       if (!batches.length) return res.status(400).json({ error: 'Choose a batch in this workspace.' });
+      if (auth.role === 'trainer') {
+        const [assignments]: any = await pool.execute('SELECT 1 FROM WorkspaceBatchAssignments WHERE workspaceId = ? AND batchId = ? AND trainerUserId = ?', [auth.workspaceId, batchId, auth.userId]);
+        if (!assignments.length) return res.status(403).json({ error: 'You are not assigned to that batch.' });
+      }
     }
     await pool.execute(
       `UPDATE Assessments SET title = COALESCE(?, title), dayNumber = COALESCE(?, dayNumber),
@@ -1050,20 +1100,20 @@ app.post('/api/assessments/:id/submissions', requireRole('student'), async (req,
     let score = 0;
     let maxMarks = 0;
     const codingResults: Record<string, number> = {};
-    questions.forEach((question: any, index: number) => {
+    for (const [index, question] of questions.entries()) {
       if (question.type === 'mcq') {
         const marks = Number(question.data?.marks || 0);
         maxMarks += marks;
         if (Number(answers[index]) === Number(question.data?.correctIndex)) score += marks;
       } else if (question.type === 'coding') {
-        const marks = 30;
+        const marks = Number(question.data?.marks || 30);
         maxMarks += marks;
         const percent = Number(codingScores?.[index]);
         const bounded = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
         codingResults[String(index)] = bounded;
         score += marks * bounded / 100;
       }
-    });
+    }
     maxMarks = maxMarks || Number(assessment.totalMarks || 0);
     const percentage = maxMarks ? Math.round(score / maxMarks * 100) : 0;
     const submissionId = randomUUID();
@@ -1414,43 +1464,13 @@ Provide 3 high-impact intervention strategies for trainers this week, including 
 
 // Code Execution Simulator
 app.post('/api/code/run', (req, res) => {
-  const { code, language, input, testCases } = req.body;
-  const startTime = Date.now();
-
-  // Evaluate simple common test cases or provide realistic simulation
-  const results = (testCases || [
-    { input: '5\n1 2 3 4 5', expected: '15' },
-    { input: '3\n10 20 30', expected: '60' },
-  ]).map((tc: any, index: number) => {
-    // Generate deterministic execution results
-    const isHidden = Boolean(tc.hidden);
+  const { code, language, testCases } = req.body;
+  const results = (testCases || []).map((tc: any, index: number) => {
     const passed = !code.includes('syntax_error_test') && !code.includes('throw');
-    return {
-      testCaseId: index + 1,
-      input: tc.input,
-      expected: tc.expected,
-      actual: passed ? tc.expected : 'Runtime Exception: IndexOutOfBounds',
-      passed,
-      hidden: isHidden,
-      executionTimeMs: Math.floor(Math.random() * 45) + 12,
-      memoryKb: Math.floor(Math.random() * 2048) + 14200,
-    };
+    return { testCaseId: index + 1, input: tc.input, expected: tc.expected, actual: passed ? tc.expected : 'Runtime Exception: IndexOutOfBounds', passed, hidden: Boolean(tc.hidden), executionTimeMs: Math.floor(Math.random() * 45) + 12, memoryKb: Math.floor(Math.random() * 2048) + 14200 };
   });
-
-  const totalPassed = results.filter((r: any) => r.passed).length;
-  const executionTimeMs = Date.now() - startTime + Math.floor(Math.random() * 80) + 30;
-
-  res.json({
-    success: totalPassed === results.length,
-    score: Math.round((totalPassed / results.length) * 100),
-    totalTestCases: results.length,
-    passedTestCases: totalPassed,
-    executionTimeMs,
-    memoryKb: 15420,
-    language: language || 'javascript',
-    stdout: `Program executed successfully in ${language}.\nPassed ${totalPassed}/${results.length} test cases.`,
-    results,
-  });
+  const totalPassed = results.filter((result: any) => result.passed).length;
+  res.json({ success: totalPassed === results.length, score: results.length ? Math.round(totalPassed / results.length * 100) : 0, totalTestCases: results.length, passedTestCases: totalPassed, executionTimeMs: 42, memoryKb: 15420, language: language || 'javascript', stdout: `Program executed in ${language}. Passed ${totalPassed}/${results.length} test cases.`, results });
 });
 
 // Start Server and Vite Middleware

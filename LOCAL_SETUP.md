@@ -12,7 +12,7 @@ Stages 3 and 4 add local authentication, college workspace boundaries, and persi
    npm run db:migrate-auth
    ```
 
-   The migration creates workspace student profiles and trainer assignments, adds workspace ownership to batches, assessments, submissions, and interview records, and copies the assessment catalog into each existing workspace. It is safe to rerun; it does not remove existing records.
+   The migration creates workspace student profiles and trainer assignments, adds workspace ownership to batches, assessments, submissions, and interview records, and copies the sample assessment catalog into each existing workspace. It is safe to rerun; it does not remove existing records.
 
 4. For the optional demonstration data, run the destructive demo seeder **before** creating the first administrator:
 

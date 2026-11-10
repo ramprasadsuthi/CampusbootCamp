@@ -429,6 +429,7 @@ export default function App() {
         assessment={assessment}
         student={selectedStudent}
         onClose={() => setActiveAssessmentId(null)}
+        onAssessmentCompleted={() => setRefreshRevision((value) => value + 1)}
       />
     );
   }

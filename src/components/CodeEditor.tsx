@@ -30,7 +30,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   standalone = true,
 }) => {
   const [selectedProblemKey, setSelectedProblemKey] = useState<string>('twoSum');
-  const problem = SAMPLE_CODING_PROBLEMS[selectedProblemKey] || initialProblem;
+  const problem = standalone ? SAMPLE_CODING_PROBLEMS[selectedProblemKey] || initialProblem : initialProblem;
 
   const [language, setLanguage] = useState<'python' | 'javascript' | 'java' | 'cpp' | 'c'>('python');
   const [code, setCode] = useState<string>(problem.templates.python);
@@ -40,6 +40,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   const [customInput, setCustomInput] = useState<string>('');
   const [useCustomInput, setUseCustomInput] = useState<boolean>(false);
   const [executionResult, setExecutionResult] = useState<any>(null);
+  const [executionError, setExecutionError] = useState('');
 
   // Switch problem
   const handleProblemChange = (key: string) => {
@@ -66,6 +67,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   // Run Code on sample test cases
   const handleRunCode = async () => {
     setIsRunning(true);
+    setExecutionError('');
     setActiveTab('terminal');
     try {
       const visibleCases = problem.testCases.filter((tc) => !tc.hidden);
@@ -77,7 +79,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       });
       setExecutionResult(res);
     } catch (error) {
-      console.error('Code execution failed:', error);
+      setExecutionError(error instanceof Error ? error.message : 'Code execution failed.');
     } finally {
       setIsRunning(false);
     }
@@ -86,6 +88,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   // Submit Code on full test suite (including hidden test cases)
   const handleSubmitCode = async () => {
     setIsSubmitting(true);
+    setExecutionError('');
     setActiveTab('terminal');
     try {
       const res = await executeCodeOnServer({
@@ -98,7 +101,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
         onSolve(res.score);
       }
     } catch (error) {
-      console.error('Submission failed:', error);
+      setExecutionError(error instanceof Error ? error.message : 'Submission failed.');
     } finally {
       setIsSubmitting(false);
     }
@@ -139,6 +142,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
           </div>
         </div>
       )}
+
+      {executionError && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-300">{executionError}</p>}
 
       {/* Editor & Problem Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
