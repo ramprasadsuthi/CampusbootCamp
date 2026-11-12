@@ -54,6 +54,53 @@ async function migrate() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceCurriculumProgress (
+      workspaceId VARCHAR(191) NOT NULL,
+      studentUserId VARCHAR(191) NOT NULL,
+      dayNumber TINYINT UNSIGNED NOT NULL,
+      completedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (workspaceId, studentUserId, dayNumber),
+      CONSTRAINT fk_curriculum_progress_membership
+        FOREIGN KEY (workspaceId, studentUserId) REFERENCES WorkspaceMemberships(workspaceId, userId) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceCurriculumMaterials (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      dayNumber TINYINT UNSIGNED NOT NULL,
+      title VARCHAR(191) NOT NULL,
+      materialType ENUM('video', 'text', 'pdf') NOT NULL,
+      contentUrl TEXT NULL,
+      contentText MEDIUMTEXT NULL,
+      position INT UNSIGNED NOT NULL DEFAULT 0,
+      isRequired TINYINT(1) NOT NULL DEFAULT 1,
+      createdByUserId VARCHAR(191) NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_curriculum_material_workspace_id (workspaceId, id),
+      KEY idx_curriculum_material_day (workspaceId, dayNumber, position),
+      CONSTRAINT fk_curriculum_material_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_curriculum_material_creator FOREIGN KEY (createdByUserId) REFERENCES Users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceCurriculumMaterialProgress (
+      workspaceId VARCHAR(191) NOT NULL,
+      studentUserId VARCHAR(191) NOT NULL,
+      materialId VARCHAR(191) NOT NULL,
+      status ENUM('not_started', 'in_progress', 'completed') NOT NULL DEFAULT 'not_started',
+      videoPositionSeconds INT UNSIGNED NOT NULL DEFAULT 0,
+      completedAt DATETIME NULL,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (workspaceId, studentUserId, materialId),
+      KEY idx_curriculum_material_progress_material (workspaceId, materialId),
+      CONSTRAINT fk_curriculum_material_progress_member FOREIGN KEY (workspaceId, studentUserId) REFERENCES WorkspaceMemberships(workspaceId, userId) ON DELETE CASCADE,
+      CONSTRAINT fk_curriculum_material_progress_material FOREIGN KEY (workspaceId, materialId) REFERENCES WorkspaceCurriculumMaterials(workspaceId, id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS WorkspaceStudentProfiles (
       workspaceId VARCHAR(191) NOT NULL,
       userId VARCHAR(191) NOT NULL,

@@ -22,6 +22,8 @@ import {
 import { BOOTCAMP_PHASES } from '../data/curriculumData';
 import { ASSESSMENTS_CATALOG } from '../data/assessmentData';
 import { StudentProfile, UserRole } from '../types';
+import { Assessment } from '../types';
+import { StudentDashboard } from './StudentDashboard';
 
 interface DashboardLandingProps {
   currentRole: UserRole;
@@ -30,6 +32,8 @@ interface DashboardLandingProps {
   onOpenAssessment: (assessmentId: string) => void;
   onDownloadReport: () => void;
   onOpenAiInsights: () => void;
+  assessments: Assessment[];
+  completedDayNumbers: number[];
 }
 
 export const DashboardLanding: React.FC<DashboardLandingProps> = ({
@@ -39,7 +43,20 @@ export const DashboardLanding: React.FC<DashboardLandingProps> = ({
   onOpenAssessment,
   onDownloadReport,
   onOpenAiInsights,
+  assessments,
+  completedDayNumbers,
 }) => {
+  if (currentRole === 'student') {
+    return <StudentDashboard
+      student={student}
+      assessments={assessments}
+      completedDayNumbers={completedDayNumbers}
+      onNavigate={onNavigate}
+      onOpenAssessment={onOpenAssessment}
+      onDownloadReport={onDownloadReport}
+    />;
+  }
+
   const currentDay = student.currentDay || 40;
 
   return (

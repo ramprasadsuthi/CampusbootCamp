@@ -15,7 +15,7 @@ import { CertificateModal } from './components/CertificateModal';
 import { AiInsightsModal } from './components/AiInsightsModal';
 import { AuthScreen } from './components/AuthScreen';
 import { WorkspaceMembers } from './components/WorkspaceMembers';
-import { archiveWorkspaceAssessment, createWorkspaceAssessment, createWorkspaceBatch, fetchBatches, fetchNotifications, fetchStudents, fetchWorkspaceAssessments, updateStudentRemarks, updateWorkspaceAssessment, updateWorkspaceBatch, updateWorkspaceStudent } from './services/api';
+import { archiveWorkspaceAssessment, createWorkspaceAssessment, createWorkspaceBatch, fetchBatches, fetchCurriculumProgress, fetchNotifications, fetchStudents, fetchWorkspaceAssessments, updateCurriculumDayCompletion, updateStudentRemarks, updateWorkspaceAssessment, updateWorkspaceBatch, updateWorkspaceStudent } from './services/api';
 import { getCurrentSession, getWorkspaceTrainers, signOut } from './services/auth';
 import { generateStudentReportPDF, exportBatchCSV } from './utils/pdfGenerator';
 import { BatchInfo, StudentProfile, UserRole } from './types';
@@ -63,6 +63,7 @@ export default function App() {
   const [trainers, setTrainers] = useState<Array<{ id: string; name: string; email: string }>>([]);
   const [refreshRevision, setRefreshRevision] = useState(0);
   const [assessments, setAssessments] = useState<any[]>([]);
+  const [completedCurriculumDays, setCompletedCurriculumDays] = useState<number[]>([]);
   const [notifications, setNotifications] = useState<any[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<StudentProfile>(EMPTY_STUDENT);
   const [darkMode, setDarkMode] = useState<boolean>(false);
@@ -87,12 +88,13 @@ export default function App() {
       setBatches([]);
       setTrainers([]);
       setAssessments([]);
+      setCompletedCurriculumDays([]);
       setNotifications([]);
       setSelectedStudent(EMPTY_STUDENT);
       return;
     }
-    Promise.all([fetchStudents(), fetchBatches(), fetchNotifications(), fetchWorkspaceAssessments(), currentRole === 'admin' ? getWorkspaceTrainers() : Promise.resolve([])])
-      .then(([data, batchData, notificationData, assessmentData, trainerData]) => {
+    Promise.all([fetchStudents(), fetchBatches(), fetchNotifications(), fetchWorkspaceAssessments(), currentRole === 'admin' ? getWorkspaceTrainers() : Promise.resolve([]), currentRole === 'student' ? fetchCurriculumProgress() : Promise.resolve([])])
+      .then(([data, batchData, notificationData, assessmentData, trainerData, curriculumProgress]) => {
         const profiles = Array.isArray(data) ? data : [];
         setStudents(profiles);
         setSelectedStudent((current) => profiles.find((student: StudentProfile) => student.id === current.id) || profiles[0] || EMPTY_STUDENT);
@@ -117,6 +119,7 @@ export default function App() {
         setNotifications(Array.isArray(notificationData) ? notificationData : []);
         setAssessments(Array.isArray(assessmentData) ? assessmentData : []);
         setTrainers(Array.isArray(trainerData) ? trainerData : []);
+        setCompletedCurriculumDays(Array.isArray(curriculumProgress) ? curriculumProgress : []);
       })
       .catch((err) => {
         console.error('Failed to fetch workspace students:', err);
@@ -137,6 +140,13 @@ export default function App() {
   const handleAssignStudent = async (studentId: string, batchId: string | null) => {
     await updateWorkspaceStudent(studentId, { batchId });
     setRefreshRevision((value) => value + 1);
+  };
+
+  const handleToggleCurriculumDay = async (dayNumber: number, completed: boolean) => {
+    await updateCurriculumDayCompletion(dayNumber, completed);
+    setCompletedCurriculumDays((current) => completed
+      ? current.includes(dayNumber) ? current : [...current, dayNumber].sort((a, b) => a - b)
+      : current.filter((day) => day !== dayNumber));
   };
 
   // Dark mode effect
@@ -227,6 +237,8 @@ export default function App() {
           <DashboardLanding
             currentRole={currentRole}
             student={selectedStudent}
+            assessments={assessments}
+            completedDayNumbers={completedCurriculumDays}
             onNavigate={(tab) => setActiveTab(tab)}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
             onDownloadReport={() => generateStudentReportPDF(selectedStudent)}
@@ -237,7 +249,17 @@ export default function App() {
       case 'curriculum':
         return (
           <CurriculumTimeline
-            onOpenAssessment={(id) => setActiveAssessmentId(id)}
+            onOpenAssessment={(id) => {
+              const curriculumDayMatch = /^assess-day-(\d+)$/.exec(id);
+              if (curriculumDayMatch) {
+                const dayAssessment = assessments.find((assessment) => Number(assessment.dayNumber) === Number(curriculumDayMatch[1]));
+                if (dayAssessment) setActiveAssessmentId(dayAssessment.id);
+                else setActiveTab('assessments');
+              } else setActiveAssessmentId(id);
+            }}
+            completedDayNumbers={completedCurriculumDays}
+            canTrackProgress={currentRole === 'student'}
+            onToggleDayCompletion={handleToggleCurriculumDay}
           />
         );
 
@@ -403,6 +425,8 @@ export default function App() {
           <DashboardLanding
             currentRole={currentRole}
             student={selectedStudent}
+            assessments={assessments}
+            completedDayNumbers={completedCurriculumDays}
             onNavigate={(tab) => setActiveTab(tab)}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
             onDownloadReport={() => generateStudentReportPDF(selectedStudent)}

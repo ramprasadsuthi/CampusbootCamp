@@ -200,6 +200,33 @@ export async function fetchWorkspaceLeaderboard(): Promise<any[]> {
 }
 
 export const fetchWorkspaceAssessments = () => apiRequest<Assessment[]>('/api/assessments');
+export const fetchCurriculumProgress = () => apiRequest<number[]>('/api/curriculum/progress');
+
+export function updateCurriculumDayCompletion(dayNumber: number, completed: boolean) {
+  return apiRequest<{ dayNumber: number; completed: boolean }>(`/api/curriculum/progress/${dayNumber}`, {
+    method: 'PUT',
+    body: JSON.stringify({ completed }),
+  });
+}
+
+export const fetchCurriculumMaterials = (dayNumber = 1) => apiRequest<CurriculumMaterial[]>(`/api/curriculum/materials?dayNumber=${dayNumber}`);
+
+export function createCurriculumMaterial(params: { title: string; materialType: CurriculumMaterialType; contentUrl?: string; contentText?: string; isRequired: boolean }) {
+  return apiRequest<CurriculumMaterial>('/api/curriculum/materials', { method: 'POST', body: JSON.stringify({ ...params, dayNumber: 1 }) });
+}
+
+export function updateCurriculumMaterial(id: string, params: { title: string; materialType: CurriculumMaterialType; contentUrl?: string; contentText?: string; isRequired: boolean }) {
+  return apiRequest<CurriculumMaterial>(`/api/curriculum/materials/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(params) });
+}
+
+export function deleteCurriculumMaterial(id: string) {
+  return apiRequest<{ success: boolean }>(`/api/curriculum/materials/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function updateCurriculumMaterialProgress(id: string, status: 'in_progress' | 'completed') {
+  return apiRequest<{ materialId: string; status: 'in_progress' | 'completed' }>(`/api/curriculum/materials/${encodeURIComponent(id)}/progress`, { method: 'PUT', body: JSON.stringify({ status }) });
+}
+
 export function createWorkspaceAssessment(params: { sourceAssessmentId: string; title: string; status: Assessment['status']; scheduledDate: string; dayNumber?: number; durationMinutes?: number; purpose?: string; batchId?: string | null }) {
   return apiRequest<Assessment>('/api/assessments', { method: 'POST', body: JSON.stringify(params) });
 }
@@ -244,7 +271,7 @@ export async function updateStudentRemarks(studentId: string, params: { remark: 
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
 }
-import { Assessment } from '../types';
+import { Assessment, CurriculumMaterial, CurriculumMaterialType } from '../types';
 
 async function apiRequest<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {

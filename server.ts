@@ -704,6 +704,182 @@ function getGeminiClient(): GoogleGenAI | null {
   return geminiClient;
 }
 
+app.get('/api/curriculum/progress', requireRole('student'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [rows]: any = await pool.execute(
+      'SELECT dayNumber FROM WorkspaceCurriculumProgress WHERE workspaceId = ? AND studentUserId = ? ORDER BY dayNumber',
+      [auth.workspaceId, auth.userId],
+    );
+    res.json(rows.map((row: any) => Number(row.dayNumber)));
+  } catch (error) {
+    console.error('Curriculum progress query failed:', error);
+    res.status(500).json({ error: 'Could not load your curriculum progress.' });
+  }
+});
+
+app.put('/api/curriculum/progress/:dayNumber', requireRole('student'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const dayNumber = Number(req.params.dayNumber);
+  const { completed } = req.body || {};
+  if (!Number.isInteger(dayNumber) || dayNumber < 1 || dayNumber > 40 || typeof completed !== 'boolean') {
+    return res.status(400).json({ error: 'Choose a curriculum day from 1 to 40 and provide its completion status.' });
+  }
+  if (dayNumber === 1 && completed) {
+    return res.status(409).json({ error: 'Day 1 completion is being transitioned to learning-material progress and a learning check.' });
+  }
+  try {
+    if (completed) {
+      await pool.execute(
+        `INSERT INTO WorkspaceCurriculumProgress (workspaceId, studentUserId, dayNumber)
+         VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE completedAt = CURRENT_TIMESTAMP`,
+        [auth.workspaceId, auth.userId, dayNumber],
+      );
+    } else {
+      await pool.execute(
+        'DELETE FROM WorkspaceCurriculumProgress WHERE workspaceId = ? AND studentUserId = ? AND dayNumber = ?',
+        [auth.workspaceId, auth.userId, dayNumber],
+      );
+    }
+    res.json({ dayNumber, completed });
+  } catch (error) {
+    console.error('Curriculum progress update failed:', error);
+    res.status(500).json({ error: 'Could not save your curriculum progress.' });
+  }
+});
+
+// Pilot learning materials are enabled for Day 1. Content is shared per workspace;
+// completion of each material is tracked separately for each student.
+app.get('/api/curriculum/materials', requireRole('college_admin', 'trainer', 'student'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const dayNumber = Number(req.query.dayNumber || 1);
+  if (dayNumber !== 1) return res.status(400).json({ error: 'Learning materials are currently enabled for Day 1 only.' });
+  try {
+    const [rows]: any = await pool.execute(
+      `SELECT m.id, m.dayNumber, m.title, m.materialType, m.contentUrl, m.contentText,
+              m.position, m.isRequired, m.createdAt, m.updatedAt,
+              p.status AS progressStatus, p.videoPositionSeconds, p.completedAt
+       FROM WorkspaceCurriculumMaterials m
+       LEFT JOIN WorkspaceCurriculumMaterialProgress p
+         ON p.workspaceId = m.workspaceId AND p.materialId = m.id AND p.studentUserId = ?
+       WHERE m.workspaceId = ? AND m.dayNumber = ?
+       ORDER BY m.position, m.createdAt, m.title`,
+      [auth.role === 'student' ? auth.userId : null, auth.workspaceId, dayNumber],
+    );
+    res.json(rows.map((row: any) => ({ ...row, isRequired: Boolean(row.isRequired), progressStatus: row.progressStatus || 'not_started' })));
+  } catch (error) {
+    console.error('Curriculum materials query failed:', error);
+    res.status(500).json({ error: 'Could not load Day 1 learning materials. Apply the latest database migration and retry.' });
+  }
+});
+
+app.post('/api/curriculum/materials', requireRole('college_admin', 'trainer'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const { dayNumber = 1, title, materialType, contentUrl, contentText, isRequired = true } = req.body || {};
+  const normalizedTitle = typeof title === 'string' ? title.trim() : '';
+  const normalizedText = typeof contentText === 'string' ? contentText.trim() : '';
+  let normalizedUrl: string | null = null;
+  if (contentUrl) {
+    try {
+      const parsed = new URL(contentUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+      normalizedUrl = parsed.toString();
+    } catch {
+      return res.status(400).json({ error: 'Enter a valid HTTP or HTTPS URL for the learning resource.' });
+    }
+  }
+  if (Number(dayNumber) !== 1 || normalizedTitle.length < 2 || normalizedTitle.length > 191 || !['video', 'text', 'pdf'].includes(materialType) || typeof isRequired !== 'boolean' || (materialType === 'text' ? !normalizedText || normalizedText.length > 50000 : !normalizedUrl)) {
+    return res.status(400).json({ error: 'For the Day 1 pilot, enter a title, choose video, text, or PDF, and provide its text or a valid resource URL.' });
+  }
+  try {
+    const id = randomUUID();
+    const [[positionRow]]: any = await pool.execute('SELECT COALESCE(MAX(position), -1) + 1 AS nextPosition FROM WorkspaceCurriculumMaterials WHERE workspaceId = ? AND dayNumber = 1', [auth.workspaceId]);
+    await pool.execute(
+      `INSERT INTO WorkspaceCurriculumMaterials
+       (id, workspaceId, dayNumber, title, materialType, contentUrl, contentText, position, isRequired, createdByUserId)
+       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, auth.workspaceId, normalizedTitle, materialType, normalizedUrl, materialType === 'text' ? normalizedText : null, positionRow.nextPosition, isRequired ? 1 : 0, auth.userId],
+    );
+    await pool.execute('INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
+      [randomUUID(), auth.workspaceId, auth.userId, 'curriculum.material_created', JSON.stringify({ materialId: id, dayNumber: 1, materialType })]);
+    res.status(201).json({ id, dayNumber: 1, title: normalizedTitle, materialType, contentUrl: normalizedUrl, contentText: materialType === 'text' ? normalizedText : null, position: positionRow.nextPosition, isRequired, progressStatus: 'not_started' });
+  } catch (error) {
+    console.error('Curriculum material creation failed:', error);
+    res.status(500).json({ error: 'Could not save this learning material.' });
+  }
+});
+
+app.patch('/api/curriculum/materials/:id', requireRole('college_admin', 'trainer'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const { title, materialType, contentUrl, contentText, isRequired } = req.body || {};
+  try {
+    const [existingRows]: any = await pool.execute('SELECT * FROM WorkspaceCurriculumMaterials WHERE id = ? AND workspaceId = ? AND dayNumber = 1 LIMIT 1', [req.params.id, auth.workspaceId]);
+    if (!existingRows.length) return res.status(404).json({ error: 'Day 1 learning material not found.' });
+    const existing = existingRows[0];
+    const nextType = materialType ?? existing.materialType;
+    const nextTitle = title === undefined ? existing.title : typeof title === 'string' ? title.trim() : '';
+    const nextText = contentText === undefined ? existing.contentText : typeof contentText === 'string' ? contentText.trim() : '';
+    let nextUrl = contentUrl === undefined ? existing.contentUrl : null;
+    if (contentUrl) {
+      try {
+        const parsed = new URL(contentUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+        nextUrl = parsed.toString();
+      } catch {
+        return res.status(400).json({ error: 'Enter a valid HTTP or HTTPS URL for the learning resource.' });
+      }
+    }
+    const required = isRequired === undefined ? Boolean(existing.isRequired) : isRequired;
+    if (nextTitle.length < 2 || nextTitle.length > 191 || !['video', 'text', 'pdf'].includes(nextType) || typeof required !== 'boolean' || (nextType === 'text' ? !nextText || nextText.length > 50000 : !nextUrl)) {
+      return res.status(400).json({ error: 'Enter a title and valid text or resource URL for this learning material.' });
+    }
+    await pool.execute(
+      `UPDATE WorkspaceCurriculumMaterials SET title = ?, materialType = ?, contentUrl = ?, contentText = ?, isRequired = ? WHERE id = ? AND workspaceId = ?`,
+      [nextTitle, nextType, nextType === 'text' ? null : nextUrl, nextType === 'text' ? nextText : null, required ? 1 : 0, req.params.id, auth.workspaceId],
+    );
+    await pool.execute('INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
+      [randomUUID(), auth.workspaceId, auth.userId, 'curriculum.material_updated', JSON.stringify({ materialId: req.params.id, dayNumber: 1 })]);
+    res.json({ id: req.params.id, dayNumber: 1, title: nextTitle, materialType: nextType, contentUrl: nextType === 'text' ? null : nextUrl, contentText: nextType === 'text' ? nextText : null, isRequired: required });
+  } catch (error) {
+    console.error('Curriculum material update failed:', error);
+    res.status(500).json({ error: 'Could not update this learning material.' });
+  }
+});
+
+app.delete('/api/curriculum/materials/:id', requireRole('college_admin', 'trainer'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [result]: any = await pool.execute('DELETE FROM WorkspaceCurriculumMaterials WHERE id = ? AND workspaceId = ? AND dayNumber = 1', [req.params.id, auth.workspaceId]);
+    if (!result.affectedRows) return res.status(404).json({ error: 'Day 1 learning material not found.' });
+    await pool.execute('INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
+      [randomUUID(), auth.workspaceId, auth.userId, 'curriculum.material_deleted', JSON.stringify({ materialId: req.params.id, dayNumber: 1 })]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Curriculum material deletion failed:', error);
+    res.status(500).json({ error: 'Could not delete this learning material.' });
+  }
+});
+
+app.put('/api/curriculum/materials/:id/progress', requireRole('student'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const { status } = req.body || {};
+  if (!['in_progress', 'completed'].includes(status)) return res.status(400).json({ error: 'Choose in progress or completed for this material.' });
+  try {
+    const [materials]: any = await pool.execute('SELECT id FROM WorkspaceCurriculumMaterials WHERE id = ? AND workspaceId = ? AND dayNumber = 1 LIMIT 1', [req.params.id, auth.workspaceId]);
+    if (!materials.length) return res.status(404).json({ error: 'Day 1 learning material not found.' });
+    await pool.execute(
+      `INSERT INTO WorkspaceCurriculumMaterialProgress (workspaceId, studentUserId, materialId, status, completedAt)
+       VALUES (?, ?, ?, ?, IF(? = 'completed', CURRENT_TIMESTAMP, NULL))
+       ON DUPLICATE KEY UPDATE status = VALUES(status), completedAt = IF(VALUES(status) = 'completed', COALESCE(completedAt, CURRENT_TIMESTAMP), NULL)`,
+      [auth.workspaceId, auth.userId, req.params.id, status, status],
+    );
+    res.json({ materialId: req.params.id, status });
+  } catch (error) {
+    console.error('Curriculum material progress update failed:', error);
+    res.status(500).json({ error: 'Could not save your learning material progress.' });
+  }
+});
+
 // Fetch all students from MySQL
 app.get('/api/students', async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
@@ -924,8 +1100,11 @@ app.get('/api/assessments', async (req, res) => {
     let attemptsByAssessment: Record<string, any> = {};
     if (auth.role === 'student') {
       const [attempts]: any = await pool.execute(
-        `SELECT assessmentId, COUNT(*) AS attemptCount, MAX(submittedAt) AS lastSubmittedAt
-         FROM Submissions WHERE workspaceId = ? AND studentId = ? GROUP BY assessmentId`,
+        `SELECT s.assessmentId, COUNT(*) AS attemptCount, MAX(s.submittedAt) AS lastSubmittedAt,
+           (SELECT latest.percentage FROM Submissions latest
+            WHERE latest.workspaceId = s.workspaceId AND latest.studentId = s.studentId AND latest.assessmentId = s.assessmentId
+            ORDER BY latest.submittedAt DESC, latest.id DESC LIMIT 1) AS latestPercentage
+         FROM Submissions s WHERE s.workspaceId = ? AND s.studentId = ? GROUP BY s.assessmentId`,
         [auth.workspaceId, auth.userId],
       );
       attemptsByAssessment = Object.fromEntries(attempts.map((attempt: any) => [attempt.assessmentId, attempt]));
@@ -937,6 +1116,7 @@ app.get('/api/assessments', async (req, res) => {
         studentStatus: auth.role === 'student' ? (attempt ? 'submitted' : 'not_started') : undefined,
         studentAttemptCount: attempt ? Number(attempt.attemptCount) : 0,
         studentLastSubmittedAt: attempt?.lastSubmittedAt || null,
+        studentLatestPercentage: attempt?.latestPercentage == null ? null : Number(attempt.latestPercentage),
       }, auth.role === 'student');
     }));
   } catch (error) {

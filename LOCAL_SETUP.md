@@ -12,7 +12,7 @@ Stages 3 and 4 add local authentication, college workspace boundaries, and persi
    npm run db:migrate-auth
    ```
 
-   The migration creates workspace student profiles and trainer assignments, adds workspace ownership to batches, assessments, submissions, and interview records, and copies the sample assessment catalog into each existing workspace. It is safe to rerun; it does not remove existing records.
+   The migration creates workspace student profiles, trainer assignments, per-student curriculum progress, Day 1 learning-material catalog and student material progress, adds workspace ownership to batches, assessments, submissions, and interview records, and copies the sample assessment catalog into each existing workspace. It is safe to rerun; it does not remove existing records.
 
 4. For the optional demonstration data, run the destructive demo seeder **before** creating the first administrator:
 
@@ -41,6 +41,8 @@ For local multi-college development, set `ALLOW_WORKSPACE_REGISTRATION=true` in 
 - College roles are stored in workspace memberships. The former role switcher is removed.
 - Student, trainer, batch, leaderboard, notification, and interview remark API queries apply workspace and role scope server-side.
 - Student profiles and batch assignments are stored per workspace. College administrators can manage batches, assign trainers and students, and invite students directly into a batch.
+- Curriculum completion is stored per student and workspace. Assessment submission status and attempt counts are derived from that student's own submission records.
+- Day 1 supports workspace-managed video links, text readings, and PDF links, with per-student material review progress. Day 1 no longer accepts a manual student day-completion action; automatic completion and learning checks are planned for the next stage. Video/document review is currently self-reported, and resource files must be hosted at an accessible HTTPS URL.
 - Assessments, submissions, and interview evaluation history are stored with workspace ownership. Student-facing assessment responses omit answer keys.
 - College administrators can invite and deactivate workspace members. Deactivation revokes that member's sessions for the workspace; the last active college administrator cannot be deactivated.
 - Workspace invitation links expire after seven days and can be accepted once.

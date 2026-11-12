@@ -46,6 +46,23 @@ export interface CurriculumDay {
   completed?: boolean;
 }
 
+export type CurriculumMaterialType = 'video' | 'text' | 'pdf';
+export type CurriculumMaterialProgressStatus = 'not_started' | 'in_progress' | 'completed';
+
+export interface CurriculumMaterial {
+  id: string;
+  dayNumber: number;
+  title: string;
+  materialType: CurriculumMaterialType;
+  contentUrl: string | null;
+  contentText: string | null;
+  position: number;
+  isRequired: boolean;
+  progressStatus: CurriculumMaterialProgressStatus;
+  videoPositionSeconds?: number;
+  completedAt?: string | null;
+}
+
 export interface TestCase {
   input: string;
   expected: string;
@@ -111,6 +128,7 @@ export interface Assessment {
   studentStatus?: 'not_started' | 'submitted';
   studentAttemptCount?: number;
   studentLastSubmittedAt?: string | null;
+  studentLatestPercentage?: number | null;
 }
 
 export interface AssessmentSubmission {

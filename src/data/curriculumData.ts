@@ -77,7 +77,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 1: Diagnostic Assessment (3 Hours - Aptitude, Reasoning, Communication)',
     assessmentType: 'Diagnostic',
     expectedOutcome: 'Baseline cohort mapping & mastery of standard computational complexity analysis',
-    completed: true,
   },
   {
     dayNumber: 2,
@@ -91,7 +90,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 2',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Fluent structural loop logic without off-by-one errors',
-    completed: true,
   },
   {
     dayNumber: 3,
@@ -105,7 +103,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 3',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Instant O(1) bit operations and fast mathematical reductions for TCS NQT',
-    completed: true,
   },
   {
     dayNumber: 4,
@@ -119,7 +116,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 4',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Optimal array transformations with strict O(1) auxiliary space',
-    completed: true,
   },
   {
     dayNumber: 5,
@@ -133,7 +129,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 5',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Confidently navigating multidimensional indices and grid bounds',
-    completed: true,
   },
   {
     dayNumber: 6,
@@ -147,7 +142,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 6',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Mastery of character frequency mappings and ASCII arithmetic',
-    completed: true,
   },
   {
     dayNumber: 7,
@@ -161,7 +155,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 7: Coding Benchmark 1 (Arrays, Strings, Sorting, Searching, Sliding Window - 90 Min)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'First milestone performance benchmark score and readiness grade',
-    completed: true,
   },
   {
     dayNumber: 8,
@@ -175,7 +168,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 8',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Writing robust custom object comparators and O(N log N) divide-and-conquer solutions',
-    completed: true,
   },
   {
     dayNumber: 9,
@@ -189,7 +181,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 9',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Applying binary search to optimization search spaces, crucial for TCS Digital',
-    completed: true,
   },
   {
     dayNumber: 10,
@@ -203,7 +194,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 10',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Intuitive pattern recognition for contiguous subarray optimization problems',
-    completed: true,
   },
   {
     dayNumber: 11,
@@ -217,7 +207,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 11',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'O(1) range queries and instant O(N) lookup tables for Infosys HackWithInfy',
-    completed: true,
   },
   {
     dayNumber: 12,
@@ -231,7 +220,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 12',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Flawless base condition design and state restoration during backtracking',
-    completed: true,
   },
   {
     dayNumber: 13,
@@ -245,7 +233,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 13',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Zero pointer-dereferencing bugs in linked structures',
-    completed: true,
   },
   {
     dayNumber: 14,
@@ -259,7 +246,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 14: Coding Benchmark 2 (Prefix Sum, Hashing, Recursion, LL, Stack, Queue, Trees)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'Clear eligibility signal for high-tier compensation brackets (6-9 LPA)',
-    completed: true,
   },
   {
     dayNumber: 15,
@@ -273,7 +259,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 15',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Mastery of monotonic stacks and deques for extreme O(N) speedups',
-    completed: true,
   },
   {
     dayNumber: 16,
@@ -287,7 +272,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 16',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Ability to solve hierarchical recursion and level-wise breadth algorithms',
-    completed: true,
   },
   {
     dayNumber: 17,
@@ -301,7 +285,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Coding Practice Drill 17',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Leveraging BST order properties for O(h) query and update algorithms',
-    completed: true,
   },
   {
     dayNumber: 18,
@@ -315,7 +298,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 18: Coding Benchmark 3 (BST, SQL Basics, OOP)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'Comprehensive synthesis of Phase 1 Data Structures & Object Modeling',
-    completed: true,
   },
 
   // Phase 2: Aptitude & Reasoning (Days 19 - 26)
@@ -331,7 +313,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Aptitude Drill 19',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Speeding up arithmetic calculation by 50% without scratchpad dependency',
-    completed: true,
   },
   {
     dayNumber: 20,
@@ -345,7 +326,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Aptitude Drill 20',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Solving multi-stage profit and interest questions under 60 seconds',
-    completed: true,
   },
   {
     dayNumber: 21,
@@ -359,7 +339,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 21: Aptitude Assessment (Arithmetic, Percentages, Ratios, SI, CI, Time & Work)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'Aptitude percentile benchmark above 85% for top IT service drives',
-    completed: true,
   },
   {
     dayNumber: 22,
@@ -373,7 +352,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Aptitude Drill 22',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Mastery of kinematic ratios and work-rate equations',
-    completed: true,
   },
   {
     dayNumber: 23,
@@ -387,7 +365,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Reasoning Drill 23',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Rapid deciphering of abstract symbolic encodings and spatial cues',
-    completed: true,
   },
   {
     dayNumber: 24,
@@ -401,7 +378,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 24: Reasoning Assessment (Logical Reasoning, Puzzles, Data Sufficiency, Analytical)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'High-speed solving of circular & linear seating arrangements under exam stress',
-    completed: true,
   },
   {
     dayNumber: 25,
@@ -415,7 +391,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily Verbal Drill 25',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Score >90% in verbal grammar and rapid text inference',
-    completed: true,
   },
   {
     dayNumber: 26,
@@ -429,7 +404,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 26: Full Aptitude Mock (Quantitative + Reasoning + Verbal)',
     assessmentType: 'Mock Test',
     expectedOutcome: 'Complete readiness for the cognitive screening tests of all IT MNCs',
-    completed: true,
   },
 
   // Phase 3: HR & Communication (Days 27 - 30)
@@ -445,7 +419,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Pitch Evaluation & Voice Assessment',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Crisp, confident, and professional verbal articulation without filler words',
-    completed: true,
   },
   {
     dayNumber: 28,
@@ -459,7 +432,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'ATS Resume Audit & Scoring',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'ATS-optimized resume scoring 90%+ with quantifiable project impact metrics',
-    completed: true,
   },
   {
     dayNumber: 29,
@@ -473,7 +445,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'GD Performance & Leadership Evaluation',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Leadership and balanced collaboration skills in group selection rounds',
-    completed: true,
   },
   {
     dayNumber: 30,
@@ -487,7 +458,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 30: Communication Assessment (Grammar, Reading, Resume, LinkedIn, HR, GD)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'Certified HR and communication readiness across written and verbal channels',
-    completed: true,
   },
 
   // Phase 4: Technical Revision & Core CS (Days 31 - 36)
@@ -503,7 +473,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 31: Company Coding Challenge (TCS NQT, Infosys, Accenture Patterns)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'Confidence in cracking exact format company coding problems within time constraints',
-    completed: true,
   },
   {
     dayNumber: 32,
@@ -517,7 +486,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Daily SQL Drill 32',
     assessmentType: 'Practice Drill',
     expectedOutcome: 'Writing robust relational queries and schema constraints without syntax slips',
-    completed: true,
   },
   {
     dayNumber: 33,
@@ -531,7 +499,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 33: SQL Assessment (Joins, Window Functions, Group By, Subqueries, Indexing)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'Advanced SQL fluency ready for technical panels and database rounds',
-    completed: true,
   },
   {
     dayNumber: 34,
@@ -545,7 +512,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 34: Technical Interview Round 1 (Coding, SQL, OOP, Projects, Problem Solving)',
     assessmentType: 'Interview',
     expectedOutcome: 'Detailed trainer feedback score across 6 technical evaluation parameters',
-    completed: true,
   },
   {
     dayNumber: 35,
@@ -559,7 +525,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 35: CS Fundamentals Assessment (DBMS, OS, Computer Networks, OOP)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'Flawless recall of core computer science fundamentals for interview rounds',
-    completed: true,
   },
   {
     dayNumber: 36,
@@ -573,7 +538,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 36: Full Technical Assessment (DSA + SQL + Core CS)',
     assessmentType: 'Mock Test',
     expectedOutcome: 'Final technical readiness percentile and company shortlist prediction',
-    completed: true,
   },
 
   // Phase 5: Placement Simulation (Days 37 - 40)
@@ -589,7 +553,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 37: Online Placement Drive (Full Corporate Test Simulation)',
     assessmentType: 'Mock Test',
     expectedOutcome: 'Replicating actual drive pressure and testing endurance across all sections',
-    completed: true,
   },
   {
     dayNumber: 38,
@@ -603,7 +566,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 38: Mock Technical Interview (Panel Evaluation & Hire/Borderline Verdict)',
     assessmentType: 'Interview',
     expectedOutcome: 'Hire recommendation from certified corporate technical panel',
-    completed: true,
   },
   {
     dayNumber: 39,
@@ -617,7 +579,6 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 39: Mock HR Interview (Behavioral, Leadership, Teamwork & STAR Scoring)',
     assessmentType: 'Interview',
     expectedOutcome: 'HR clearance rating with full behavioral interview readiness',
-    completed: true,
   },
   {
     dayNumber: 40,
@@ -631,6 +592,5 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     assessmentTitle: 'Day 40: Final Placement Assessment & Performance Review (Placement Readiness Report)',
     assessmentType: 'Benchmark Test',
     expectedOutcome: 'Graduation with official placement readiness score, downloadable PDF dossier, and company eligibility certificates',
-    completed: false, // current interactive day
   },
 ];
