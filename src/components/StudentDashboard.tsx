@@ -8,6 +8,7 @@ interface Props {
   assessments: Assessment[];
   completedDayNumbers: number[];
   onNavigate: (tab: string) => void;
+  onContinueCourse: (dayNumber: number) => void;
   onOpenAssessment: (assessmentId: string) => void;
   onDownloadReport: () => void;
 }
@@ -15,7 +16,7 @@ interface Props {
 const percent = (value: number) => Math.max(0, Math.min(100, Number(value) || 0));
 const dateLabel = (value?: string | null) => value ? new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
 
-export const StudentDashboard: React.FC<Props> = ({ student, assessments, completedDayNumbers, onNavigate, onOpenAssessment, onDownloadReport }) => {
+export const StudentDashboard: React.FC<Props> = ({ student, assessments, completedDayNumbers, onNavigate, onContinueCourse, onOpenAssessment, onDownloadReport }) => {
   const completed = new Set(completedDayNumbers);
   const completedCount = completed.size;
   const nextDay = CURRICULUM_40_DAYS.find((day) => !completed.has(day.dayNumber));
@@ -48,7 +49,7 @@ export const StudentDashboard: React.FC<Props> = ({ student, assessments, comple
       <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-2 dark:border-slate-800 dark:bg-slate-900">
         <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-semibold text-indigo-600">YOUR NEXT STEP</p><h2 className="mt-1 text-xl font-bold text-slate-900 dark:text-white">{nextDay ? `Day ${nextDay.dayNumber}: ${nextDay.topic}` : '40-day course complete'}</h2><p className="mt-2 text-sm text-slate-500">{nextDay ? `${nextDay.phaseName} · ${nextDay.expectedOutcome}` : 'You have completed every day in the course roadmap.'}</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">{completedCount}/40 days</span></div>
         <div className="mt-5 h-2 rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-indigo-600" style={{ width: `${Math.round(completedCount / 40 * 100)}%` }} /></div>
-        <button onClick={() => onNavigate('curriculum')} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700">{nextDay ? 'Continue course' : 'Review course'} <ArrowRight size={16} /></button>
+        <button onClick={() => nextDay ? onContinueCourse(nextDay.dayNumber) : onNavigate('curriculum')} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700">{nextDay ? 'Continue course' : 'Review course'} <ArrowRight size={16} /></button>
       </article>
       <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"><h2 className="font-bold text-slate-900 dark:text-white">Your skill scores</h2><p className="mt-1 text-xs text-slate-500">Personal scores currently recorded</p><div className="mt-4 space-y-3">{[['Coding', student.metrics.coding], ['Aptitude', student.metrics.aptitude], ['Reasoning', student.metrics.reasoning], ['Communication', student.metrics.communication]].map(([name, score]) => <div key={String(name)}><div className="mb-1 flex justify-between text-sm"><span className="text-slate-600 dark:text-slate-300">{name}</span><b className="text-slate-900 dark:text-white">{percent(Number(score))}%</b></div><div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-indigo-500" style={{ width: `${percent(Number(score))}%` }} /></div></div>)}</div></article>
     </section>

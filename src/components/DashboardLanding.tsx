@@ -29,6 +29,7 @@ interface DashboardLandingProps {
   currentRole: UserRole;
   student: StudentProfile;
   onNavigate: (tab: string) => void;
+  onContinueCourse: (dayNumber: number) => void;
   onOpenAssessment: (assessmentId: string) => void;
   onDownloadReport: () => void;
   onOpenAiInsights: () => void;
@@ -40,6 +41,7 @@ export const DashboardLanding: React.FC<DashboardLandingProps> = ({
   currentRole,
   student,
   onNavigate,
+  onContinueCourse,
   onOpenAssessment,
   onDownloadReport,
   onOpenAiInsights,
@@ -52,6 +54,7 @@ export const DashboardLanding: React.FC<DashboardLandingProps> = ({
       assessments={assessments}
       completedDayNumbers={completedDayNumbers}
       onNavigate={onNavigate}
+      onContinueCourse={onContinueCourse}
       onOpenAssessment={onOpenAssessment}
       onDownloadReport={onDownloadReport}
     />;

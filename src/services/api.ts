@@ -210,12 +210,14 @@ export function updateCurriculumDayCompletion(dayNumber: number, completed: bool
 }
 
 export const fetchCurriculumMaterials = (dayNumber = 1) => apiRequest<CurriculumMaterial[]>(`/api/curriculum/materials?dayNumber=${dayNumber}`);
+export const fetchCurriculumLearningCheck = (dayNumber: number) => apiRequest<CurriculumLearningCheck>(`/api/curriculum/learning-check?dayNumber=${dayNumber}`);
+export const submitCurriculumLearningCheck = (dayNumber: number, answers: Record<number, number>) => apiRequest<{ id: string; dayNumber: number; score: number; questionCount: number; passingScore: number; passed: boolean; completion: CurriculumLearningCheck['completion'] }>('/api/curriculum/learning-check/attempts', { method: 'POST', body: JSON.stringify({ dayNumber, answers }) });
 
-export function createCurriculumMaterial(params: { title: string; materialType: CurriculumMaterialType; contentUrl?: string; contentText?: string; isRequired: boolean }) {
-  return apiRequest<CurriculumMaterial>('/api/curriculum/materials', { method: 'POST', body: JSON.stringify({ ...params, dayNumber: 1 }) });
+export function createCurriculumMaterial(params: { dayNumber: number; title: string; materialType: CurriculumMaterialType; contentUrl?: string; contentText?: string; contentFormat?: CurriculumTextFormat; isRequired: boolean }) {
+  return apiRequest<CurriculumMaterial>('/api/curriculum/materials', { method: 'POST', body: JSON.stringify(params) });
 }
 
-export function updateCurriculumMaterial(id: string, params: { title: string; materialType: CurriculumMaterialType; contentUrl?: string; contentText?: string; isRequired: boolean }) {
+export function updateCurriculumMaterial(id: string, params: { title: string; materialType: CurriculumMaterialType; contentUrl?: string; contentText?: string; contentFormat?: CurriculumTextFormat; isRequired: boolean }) {
   return apiRequest<CurriculumMaterial>(`/api/curriculum/materials/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(params) });
 }
 
@@ -271,7 +273,7 @@ export async function updateStudentRemarks(studentId: string, params: { remark: 
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
 }
-import { Assessment, CurriculumMaterial, CurriculumMaterialType } from '../types';
+import { Assessment, CurriculumLearningCheck, CurriculumMaterial, CurriculumMaterialType, CurriculumTextFormat } from '../types';
 
 async function apiRequest<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {

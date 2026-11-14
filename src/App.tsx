@@ -15,7 +15,7 @@ import { CertificateModal } from './components/CertificateModal';
 import { AiInsightsModal } from './components/AiInsightsModal';
 import { AuthScreen } from './components/AuthScreen';
 import { WorkspaceMembers } from './components/WorkspaceMembers';
-import { archiveWorkspaceAssessment, createWorkspaceAssessment, createWorkspaceBatch, fetchBatches, fetchCurriculumProgress, fetchNotifications, fetchStudents, fetchWorkspaceAssessments, updateCurriculumDayCompletion, updateStudentRemarks, updateWorkspaceAssessment, updateWorkspaceBatch, updateWorkspaceStudent } from './services/api';
+import { archiveWorkspaceAssessment, createWorkspaceAssessment, createWorkspaceBatch, fetchBatches, fetchCurriculumProgress, fetchNotifications, fetchStudents, fetchWorkspaceAssessments, updateStudentRemarks, updateWorkspaceAssessment, updateWorkspaceBatch, updateWorkspaceStudent } from './services/api';
 import { getCurrentSession, getWorkspaceTrainers, signOut } from './services/auth';
 import { generateStudentReportPDF, exportBatchCSV } from './utils/pdfGenerator';
 import { BatchInfo, StudentProfile, UserRole } from './types';
@@ -58,6 +58,7 @@ export default function App() {
   const [session, setSession] = useState<AuthenticatedSession | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [curriculumTargetDay, setCurriculumTargetDay] = useState<number | null>(null);
   const [students, setStudents] = useState<StudentProfile[]>([]);
   const [batches, setBatches] = useState<BatchInfo[]>([]);
   const [trainers, setTrainers] = useState<Array<{ id: string; name: string; email: string }>>([]);
@@ -142,11 +143,14 @@ export default function App() {
     setRefreshRevision((value) => value + 1);
   };
 
-  const handleToggleCurriculumDay = async (dayNumber: number, completed: boolean) => {
-    await updateCurriculumDayCompletion(dayNumber, completed);
-    setCompletedCurriculumDays((current) => completed
-      ? current.includes(dayNumber) ? current : [...current, dayNumber].sort((a, b) => a - b)
-      : current.filter((day) => day !== dayNumber));
+  const refreshCurriculumProgress = async () => {
+    const progress = await fetchCurriculumProgress();
+    setCompletedCurriculumDays(Array.isArray(progress) ? progress : []);
+  };
+
+  const handleContinueCourse = (dayNumber: number) => {
+    setCurriculumTargetDay(dayNumber);
+    setActiveTab('curriculum');
   };
 
   // Dark mode effect
@@ -240,6 +244,7 @@ export default function App() {
             assessments={assessments}
             completedDayNumbers={completedCurriculumDays}
             onNavigate={(tab) => setActiveTab(tab)}
+            onContinueCourse={handleContinueCourse}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
             onDownloadReport={() => generateStudentReportPDF(selectedStudent)}
             onOpenAiInsights={() => setShowAiModal(true)}
@@ -259,7 +264,9 @@ export default function App() {
             }}
             completedDayNumbers={completedCurriculumDays}
             canTrackProgress={currentRole === 'student'}
-            onToggleDayCompletion={handleToggleCurriculumDay}
+            onProgressRefresh={refreshCurriculumProgress}
+            focusDayNumber={curriculumTargetDay}
+            onFocusDayHandled={() => setCurriculumTargetDay(null)}
           />
         );
 
@@ -428,6 +435,7 @@ export default function App() {
             assessments={assessments}
             completedDayNumbers={completedCurriculumDays}
             onNavigate={(tab) => setActiveTab(tab)}
+            onContinueCourse={handleContinueCourse}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
             onDownloadReport={() => generateStudentReportPDF(selectedStudent)}
             onOpenAiInsights={() => setShowAiModal(true)}

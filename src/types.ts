@@ -47,6 +47,7 @@ export interface CurriculumDay {
 }
 
 export type CurriculumMaterialType = 'video' | 'text' | 'pdf';
+export type CurriculumTextFormat = 'markdown' | 'html';
 export type CurriculumMaterialProgressStatus = 'not_started' | 'in_progress' | 'completed';
 
 export interface CurriculumMaterial {
@@ -56,11 +57,22 @@ export interface CurriculumMaterial {
   materialType: CurriculumMaterialType;
   contentUrl: string | null;
   contentText: string | null;
+  contentFormat: CurriculumTextFormat;
   position: number;
   isRequired: boolean;
   progressStatus: CurriculumMaterialProgressStatus;
   videoPositionSeconds?: number;
   completedAt?: string | null;
+}
+
+export interface CurriculumLearningCheck {
+  dayNumber: number;
+  title: string;
+  passingScore: number;
+  questions: Array<{ prompt: string; options: string[] }>;
+  attemptCount: number;
+  latestAttempt: { score: number; questionCount: number; passed: boolean; submittedAt: string } | null;
+  completion: { completed: boolean; requiredCount: number; completedCount: number; checkPassed: boolean };
 }
 
 export interface TestCase {

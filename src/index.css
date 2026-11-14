@@ -37,3 +37,52 @@
   animation: scaleUp 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+.lesson-rich-content > :first-child { margin-top: 0; }
+.lesson-rich-content > :last-child { margin-bottom: 0; }
+.lesson-rich-content h1,
+.lesson-rich-content h2,
+.lesson-rich-content h3,
+.lesson-rich-content h4,
+.lesson-rich-content h5,
+.lesson-rich-content h6 {
+  margin: 1.5em 0 0.55em;
+  color: #0f172a;
+  font-weight: 750;
+  line-height: 1.25;
+}
+.lesson-rich-content h1 { font-size: 1.8rem; }
+.lesson-rich-content h2 { font-size: 1.5rem; }
+.lesson-rich-content h3 { font-size: 1.25rem; }
+.lesson-rich-content h4,
+.lesson-rich-content h5,
+.lesson-rich-content h6 { font-size: 1.05rem; }
+.lesson-rich-content p { margin: 0.85em 0; }
+.lesson-rich-content ul,
+.lesson-rich-content ol { margin: 0.9em 0; padding-left: 1.6rem; }
+.lesson-rich-content ul { list-style: disc; }
+.lesson-rich-content ol { list-style: decimal; }
+.lesson-rich-content li { margin: 0.3em 0; padding-left: 0.15rem; }
+.lesson-rich-content blockquote { margin: 1rem 0; border-left: 4px solid #818cf8; padding: 0.25rem 1rem; color: #475569; background: #f8fafc; }
+.lesson-rich-content code { border-radius: 0.3rem; background: #f1f5f9; padding: 0.12rem 0.35rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+.lesson-rich-content pre { margin: 1rem 0; overflow-x: auto; border-radius: 0.75rem; background: #0f172a; padding: 1rem; color: #e2e8f0; }
+.lesson-rich-content pre code { background: transparent; padding: 0; color: inherit; }
+.lesson-rich-content a { color: #4f46e5; text-decoration: underline; text-underline-offset: 2px; }
+.lesson-rich-content hr { margin: 1.5rem 0; border: 0; border-top: 1px solid #cbd5e1; }
+.lesson-rich-content table { width: 100%; margin: 1rem 0; border-collapse: collapse; font-size: 0.9em; }
+.lesson-rich-content th,
+.lesson-rich-content td { border: 1px solid #cbd5e1; padding: 0.55rem 0.7rem; text-align: left; }
+.lesson-rich-content th { background: #f1f5f9; font-weight: 700; }
+.lesson-rich-content img { max-width: 100%; height: auto; margin: 1rem auto; border-radius: 0.75rem; }
+.dark .lesson-rich-content h1,
+.dark .lesson-rich-content h2,
+.dark .lesson-rich-content h3,
+.dark .lesson-rich-content h4,
+.dark .lesson-rich-content h5,
+.dark .lesson-rich-content h6 { color: #f8fafc; }
+.dark .lesson-rich-content blockquote { color: #cbd5e1; background: #1e293b; }
+.dark .lesson-rich-content code { background: #1e293b; color: #e2e8f0; }
+.dark .lesson-rich-content hr,
+.dark .lesson-rich-content th,
+.dark .lesson-rich-content td { border-color: #475569; }
+.dark .lesson-rich-content th { background: #1e293b; }
+

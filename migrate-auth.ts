@@ -74,6 +74,7 @@ async function migrate() {
       materialType ENUM('video', 'text', 'pdf') NOT NULL,
       contentUrl TEXT NULL,
       contentText MEDIUMTEXT NULL,
+      contentFormat ENUM('markdown', 'html') NOT NULL DEFAULT 'markdown',
       position INT UNSIGNED NOT NULL DEFAULT 0,
       isRequired TINYINT(1) NOT NULL DEFAULT 1,
       createdByUserId VARCHAR(191) NULL,
@@ -98,6 +99,33 @@ async function migrate() {
       KEY idx_curriculum_material_progress_material (workspaceId, materialId),
       CONSTRAINT fk_curriculum_material_progress_member FOREIGN KEY (workspaceId, studentUserId) REFERENCES WorkspaceMemberships(workspaceId, userId) ON DELETE CASCADE,
       CONSTRAINT fk_curriculum_material_progress_material FOREIGN KEY (workspaceId, materialId) REFERENCES WorkspaceCurriculumMaterials(workspaceId, id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceCurriculumLearningChecks (
+      workspaceId VARCHAR(191) NOT NULL,
+      dayNumber TINYINT UNSIGNED NOT NULL,
+      title VARCHAR(191) NOT NULL,
+      passingScore TINYINT UNSIGNED NOT NULL DEFAULT 70,
+      questionsJson MEDIUMTEXT NOT NULL,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (workspaceId, dayNumber),
+      CONSTRAINT fk_curriculum_check_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceCurriculumLearningCheckAttempts (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      studentUserId VARCHAR(191) NOT NULL,
+      dayNumber TINYINT UNSIGNED NOT NULL,
+      score TINYINT UNSIGNED NOT NULL,
+      questionCount TINYINT UNSIGNED NOT NULL,
+      passed TINYINT(1) NOT NULL,
+      answersJson TEXT NOT NULL,
+      submittedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_curriculum_check_attempts_student (workspaceId, studentUserId, dayNumber, submittedAt),
+      CONSTRAINT fk_curriculum_check_attempt_member FOREIGN KEY (workspaceId, studentUserId) REFERENCES WorkspaceMemberships(workspaceId, userId) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
   await pool.query(`
@@ -216,6 +244,7 @@ async function migrate() {
   await addColumn('Notifications', 'workspaceId', 'VARCHAR(191) NULL');
   await addColumn('Notifications', 'createdAt', 'DATETIME NULL DEFAULT CURRENT_TIMESTAMP');
   await addColumn('WorkspaceInvitations', 'batchId', 'VARCHAR(191) NULL');
+  await addColumn('WorkspaceCurriculumMaterials', 'contentFormat', "ENUM('markdown', 'html') NOT NULL DEFAULT 'markdown'");
   await addColumn('Assessments', 'workspaceId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'createdByUserId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'batchId', 'VARCHAR(191) NULL');
