@@ -42,9 +42,11 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(100, 116, 139);
-  doc.text(`Roll Number: ${student.rollNo}  |  Branch: ${student.branch}`, 20, 58);
-  doc.text(`College: ${student.college}`, 20, 64);
-  doc.text(`Batch: ${student.batch}  |  Lead Trainer: ${student.trainer}`, 20, 70);
+  doc.setFontSize(8);
+  doc.text(`Email: ${student.email || 'Not recorded'}`, 20, 58);
+  doc.text(`Roll Number: ${student.rollNo || 'Not recorded'}  |  Branch: ${student.branch || 'Not recorded'}`, 20, 63);
+  doc.text(`College: ${student.college || 'Not recorded'}`, 20, 68);
+  doc.text(`Batch: ${student.batch || 'Not assigned'}  |  Lead Trainer: ${student.trainer || 'Not assigned'}`, 20, 73);
 
   // Score Badge in Card
   doc.setFillColor(...primaryIndigo);
@@ -171,7 +173,7 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.setFontSize(8.5);
   doc.setFont('helvetica', 'italic');
   doc.setTextColor(51, 65, 85);
-  const trainerComment = student.recentRemarks[0]?.comment || 'Candidate is highly motivated with exceptional problem-solving and structured algorithmic reasoning.';
+  const trainerComment = student.recentRemarks[0]?.comment || 'No trainer feedback has been recorded for this student.';
   const splitComment = doc.splitTextToSize(`"${trainerComment}" - ${student.trainer}`, 174);
   doc.text(splitComment, 18, yPos + 6);
 
@@ -179,7 +181,8 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   doc.setTextColor(148, 163, 184);
-  doc.text('Talent Edge Placement Cell | Certified Digitally Signed Report | Document ID: TED-CPR-2026-8849', 14, 288);
+  const reportId = (student.id || student.rollNo || 'STUDENT').replace(/[^a-z0-9]/gi, '').slice(-12).toUpperCase();
+  doc.text(`Talent Edge Placement Cell | Student Report | Document ID: TED-CPR-${reportId}`, 14, 288);
   doc.text('Page 1 of 1', 185, 288);
 
   // Save the PDF

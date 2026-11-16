@@ -17,6 +17,7 @@ interface NavbarProps {
   currentRole: UserRole;
   session: AuthenticatedSession;
   onSignOut: () => void;
+  onOpenAccountProfile: () => void;
   students: StudentProfile[];
   selectedStudent: StudentProfile;
   onSelectStudent: (student: StudentProfile) => void;
@@ -33,6 +34,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   currentRole,
   session,
   onSignOut,
+  onOpenAccountProfile,
   students,
   selectedStudent,
   onSelectStudent,
@@ -152,11 +154,16 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
             <div className="max-w-36 truncate text-[10px] text-slate-500 dark:text-slate-400">{session.workspace.name}</div>
           </div>
-          <img
-            src={session.user.avatar || selectedStudent?.photo}
-            alt="Account avatar"
-            className="h-8 w-8 rounded-full bg-slate-200 border-2 border-white dark:border-slate-800 shadow-xs object-cover"
-          />
+          <button type="button" onClick={onOpenAccountProfile} className="group flex items-center gap-2 rounded-lg p-1 text-left hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:hover:bg-slate-800" title="Open account profile" aria-label="Open account profile">
+            <span className="hidden md:block text-[10px] font-semibold text-slate-500 group-hover:text-indigo-600 dark:text-slate-400">My profile</span>
+            {session.user.avatar ? (
+              <img src={session.user.avatar} alt="" className="h-8 w-8 rounded-full bg-slate-200 border-2 border-white dark:border-slate-800 shadow-xs object-cover" />
+            ) : (
+              <span className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white bg-indigo-100 text-[11px] font-bold text-indigo-700 shadow-xs dark:border-slate-800 dark:bg-indigo-950 dark:text-indigo-300">
+                {session.user.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || 'U'}
+              </span>
+            )}
+          </button>
           <button onClick={onSignOut} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-rose-600 dark:hover:bg-slate-800" title="Sign out" aria-label="Sign out"><LogOut className="h-4 w-4" /></button>
         </div>
       </div>

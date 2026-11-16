@@ -5,6 +5,8 @@ import { Assessment, BatchInfo } from '../types';
 
 interface AssessmentListProps {
   assessments: Assessment[];
+  assessmentsLoading: boolean;
+  assessmentsError: string;
   batches: BatchInfo[];
   canManage: boolean;
   onOpenAssessment: (assessmentId: string) => void;
@@ -17,6 +19,8 @@ type EditorState = { kind: 'create' } | { kind: 'edit'; assessment: Assessment }
 
 export const AssessmentList: React.FC<AssessmentListProps> = ({
   assessments,
+  assessmentsLoading,
+  assessmentsError,
   batches,
   canManage,
   onOpenAssessment,
@@ -104,7 +108,9 @@ export const AssessmentList: React.FC<AssessmentListProps> = ({
       </header>
 
       {error && !editor && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p>}
-      {assessments.length === 0 ? <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">No assessments are configured for this workspace yet. Apply the database migration, then refresh this page.</div> : <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      {assessmentsLoading ? <div role="status" className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">Loading assessments…</div>
+        : assessmentsError ? <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-center text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950/30">Could not load assessments: {assessmentsError}. Please refresh, and contact your administrator if this continues.</div>
+          : assessments.length === 0 ? <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900">{canManage ? 'No assessment templates are available. Verify the database migration, then refresh this page.' : 'No assessments are assigned to your account or batch yet. Ask your college administrator to confirm your batch assignment and assessment schedule.'}</div> : <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {assessments.map((assessment) => {
           const isLive = assessment.status === 'live';
           const isCompleted = assessment.status === 'completed';

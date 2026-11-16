@@ -33,7 +33,7 @@ interface AuthContext {
 
 type AuthenticatedRequest = Request & { auth?: AuthContext };
 
-app.use(express.json());
+app.use(express.json({ limit: '400kb' }));
 
 // Unauthenticated liveness endpoint for local and future deployment health checks.
 app.get('/api/health', (_req, res) => {
@@ -57,14 +57,16 @@ const pool = mysql.createPool({
 });
 
 async function ensureWorkspaceAssessments(db: any, workspaceId: string, createdByUserId: string | null = null) {
-  const [existing]: any = await db.execute('SELECT id FROM Assessments WHERE workspaceId = ? LIMIT 1', [workspaceId]);
-  if (existing.length > 0) return;
+  const [existing]: any = await db.execute('SELECT id FROM Assessments WHERE workspaceId = ?', [workspaceId]);
+  const existingIds = new Set(existing.map((row: { id: string }) => row.id));
   for (const assessment of ASSESSMENTS_CATALOG) {
+    const id = `${workspaceId}:${assessment.id}`;
+    if (existingIds.has(id)) continue;
     await db.execute(
-      `INSERT INTO Assessments
+      `INSERT IGNORE INTO Assessments
        (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [`${workspaceId}:${assessment.id}`, workspaceId, assessment.dayNumber, assessment.title, assessment.type,
+      [id, workspaceId, assessment.dayNumber, assessment.title, assessment.type,
         assessment.durationMinutes, assessment.totalMarks, JSON.stringify(assessment.coverage), assessment.purpose,
         assessment.status, assessment.scheduledDate, JSON.stringify(assessment.sections),
         JSON.stringify(assessment.targetCompanies), createdByUserId],
@@ -492,6 +494,40 @@ app.post('/api/auth/change-password', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Password update failed:', error);
     res.status(500).json({ error: 'Could not update the password.' });
+  }
+});
+
+app.patch('/api/auth/profile', authenticate, async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const avatar = req.body?.avatar;
+  if (name.length < 2 || name.length > 100) {
+    return res.status(400).json({ error: 'Name must be between 2 and 100 characters.' });
+  }
+  if (avatar !== undefined && avatar !== null && avatar !== '') {
+    if (typeof avatar !== 'string' || !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(avatar)) {
+      return res.status(400).json({ error: 'Choose a JPEG, PNG, or WebP profile image.' });
+    }
+    const encodedImage = avatar.slice(avatar.indexOf(',') + 1);
+    if (Buffer.from(encodedImage, 'base64').length > 250 * 1024) {
+      return res.status(400).json({ error: 'Profile images must be smaller than 250 KB.' });
+    }
+  }
+  try {
+    if (avatar === undefined) {
+      await pool.execute('UPDATE Users SET name = ? WHERE id = ?', [name, auth.userId]);
+    } else {
+      await pool.execute('UPDATE Users SET name = ?, avatar = ? WHERE id = ?', [name, avatar || null, auth.userId]);
+    }
+    await pool.execute(
+      'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, targetUserId) VALUES (?, ?, ?, ?, ?)',
+      [randomUUID(), auth.workspaceId, auth.userId, 'member.profile_updated', auth.userId],
+    );
+    const [rows]: any = await pool.execute('SELECT id, name, email, avatar FROM Users WHERE id = ? LIMIT 1', [auth.userId]);
+    res.json({ user: rows[0] });
+  } catch (error) {
+    console.error('Account profile update failed:', error);
+    res.status(500).json({ error: 'Could not save your profile. Run the latest database migration and try again.' });
   }
 });
 
@@ -1281,7 +1317,8 @@ app.get('/api/assessments', async (req, res) => {
            (SELECT latest.percentage FROM Submissions latest
             WHERE latest.workspaceId = s.workspaceId AND latest.studentId = s.studentId AND latest.assessmentId = s.assessmentId
             ORDER BY latest.submittedAt DESC, latest.id DESC LIMIT 1) AS latestPercentage
-         FROM Submissions s WHERE s.workspaceId = ? AND s.studentId = ? GROUP BY s.assessmentId`,
+         FROM Submissions s WHERE s.workspaceId = ? AND s.studentId = ?
+         GROUP BY s.workspaceId, s.studentId, s.assessmentId`,
         [auth.workspaceId, auth.userId],
       );
       attemptsByAssessment = Object.fromEntries(attempts.map((attempt: any) => [attempt.assessmentId, attempt]));

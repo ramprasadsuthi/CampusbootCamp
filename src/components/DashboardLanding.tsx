@@ -28,6 +28,7 @@ import { StudentDashboard } from './StudentDashboard';
 interface DashboardLandingProps {
   currentRole: UserRole;
   student: StudentProfile;
+  displayName: string;
   onNavigate: (tab: string) => void;
   onContinueCourse: (dayNumber: number) => void;
   onOpenAssessment: (assessmentId: string) => void;
@@ -35,11 +36,14 @@ interface DashboardLandingProps {
   onOpenAiInsights: () => void;
   assessments: Assessment[];
   completedDayNumbers: number[];
+  curriculumProgressLoading: boolean;
+  curriculumProgressError: string;
 }
 
 export const DashboardLanding: React.FC<DashboardLandingProps> = ({
   currentRole,
   student,
+  displayName,
   onNavigate,
   onContinueCourse,
   onOpenAssessment,
@@ -47,12 +51,17 @@ export const DashboardLanding: React.FC<DashboardLandingProps> = ({
   onOpenAiInsights,
   assessments,
   completedDayNumbers,
+  curriculumProgressLoading,
+  curriculumProgressError,
 }) => {
   if (currentRole === 'student') {
     return <StudentDashboard
       student={student}
+      displayName={displayName}
       assessments={assessments}
       completedDayNumbers={completedDayNumbers}
+      curriculumProgressLoading={curriculumProgressLoading}
+      curriculumProgressError={curriculumProgressError}
       onNavigate={onNavigate}
       onContinueCourse={onContinueCourse}
       onOpenAssessment={onOpenAssessment}

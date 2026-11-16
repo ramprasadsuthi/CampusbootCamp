@@ -23,6 +23,18 @@ async function seed() {
     const [workspaceRows]: any = await connection.query('SELECT id FROM Workspaces ORDER BY createdAt LIMIT 1');
     if (!workspaceRows.length) throw new Error('No workspace found. Run npm run db:migrate-auth first.');
     const workspaceId = workspaceRows[0].id;
+    const [[curriculumData]]: any = await connection.query(`
+      SELECT
+        (SELECT COUNT(*) FROM WorkspaceCurriculumLearningCheckAttempts) AS learningCheckAttempts,
+        (SELECT COUNT(*) FROM WorkspaceCurriculumProgress) AS completedDays,
+        (SELECT COUNT(*) FROM WorkspaceCurriculumMaterialProgress) AS materialProgress
+    `);
+    const storedCurriculumActivity = Number(curriculumData.learningCheckAttempts)
+      + Number(curriculumData.completedDays)
+      + Number(curriculumData.materialProgress);
+    if (storedCurriculumActivity > 0) {
+      throw new Error('Refusing to reseed: saved learning checks or curriculum progress exist. This demo seed truncates users and memberships, which would cascade-delete that student data.');
+    }
     console.log('Cleaning existing tables...');
     await connection.query('SET FOREIGN_KEY_CHECKS = 0');
     await connection.query('TRUNCATE TABLE WorkspaceInvitations');
@@ -232,6 +244,7 @@ async function seed() {
     console.log('Database seeded successfully!');
   } catch (error) {
     console.error('Error seeding database:', error);
+    process.exitCode = 1;
   } finally {
     await connection.end();
   }

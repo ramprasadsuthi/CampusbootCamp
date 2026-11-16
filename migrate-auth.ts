@@ -239,6 +239,8 @@ async function migrate() {
 
   await addColumn('Users', 'passwordHash', 'VARCHAR(255) NULL');
   await addColumn('Users', 'isActive', 'TINYINT(1) NOT NULL DEFAULT 1');
+  // Profile pictures are stored as small, resized data URLs so local deployments need no file service.
+  await pool.query('ALTER TABLE Users MODIFY COLUMN avatar MEDIUMTEXT NULL');
   await addColumn('Batches', 'workspaceId', 'VARCHAR(191) NULL');
   await addColumn('Batches', 'isArchived', 'TINYINT(1) NOT NULL DEFAULT 0');
   await addColumn('Notifications', 'workspaceId', 'VARCHAR(191) NULL');
@@ -306,15 +308,17 @@ async function migrate() {
 
   const [allWorkspaces]: any = await pool.query('SELECT id FROM Workspaces');
   for (const workspace of allWorkspaces) {
-    const [assessmentRows]: any = await pool.execute('SELECT id FROM Assessments WHERE workspaceId = ? LIMIT 1', [workspace.id]);
-    if (assessmentRows.length > 0) continue;
+    const [workspaceAssessments]: any = await pool.execute('SELECT id FROM Assessments WHERE workspaceId = ?', [workspace.id]);
+    const existingAssessmentIds = new Set(workspaceAssessments.map((assessment: { id: string }) => assessment.id));
     for (const assessment of ASSESSMENTS_CATALOG) {
+      const assessmentId = `${workspace.id}:${assessment.id}`;
+      if (existingAssessmentIds.has(assessmentId)) continue;
       await pool.execute(
-        `INSERT INTO Assessments
+        `INSERT IGNORE INTO Assessments
          (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          `${workspace.id}:${assessment.id}`,
+          assessmentId,
           workspace.id,
           assessment.dayNumber,
           assessment.title,

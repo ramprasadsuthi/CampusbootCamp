@@ -123,9 +123,11 @@ interface CurriculumTimelineProps {
   onProgressRefresh: () => Promise<void>;
   focusDayNumber?: number | null;
   onFocusDayHandled?: () => void;
+  curriculumProgressLoading?: boolean;
+  curriculumProgressError?: string;
 }
 
-export const CurriculumTimeline: React.FC<CurriculumTimelineProps> = ({ onOpenAssessment, completedDayNumbers, canTrackProgress, onProgressRefresh, focusDayNumber, onFocusDayHandled }) => {
+export const CurriculumTimeline: React.FC<CurriculumTimelineProps> = ({ onOpenAssessment, completedDayNumbers, canTrackProgress, onProgressRefresh, focusDayNumber, onFocusDayHandled, curriculumProgressLoading = false, curriculumProgressError = '' }) => {
   const [selectedPhase, setSelectedPhase] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedDifficulty, setSelectedDifficulty] = useState<string>('all');
@@ -205,13 +207,26 @@ export const CurriculumTimeline: React.FC<CurriculumTimelineProps> = ({ onOpenAs
 
   useEffect(() => {
     if (!focusDayNumber || focusDayNumber < 1 || focusDayNumber > 40) return;
-    setExpandedDays((current) => ({ ...current, [focusDayNumber]: true }));
-    const frame = requestAnimationFrame(() => {
-      document.getElementById(`curriculum-day-card-${focusDayNumber}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      onFocusDayHandled?.();
+    // A Continue action should focus one day, not leave previously expanded days
+    // occupying the viewport above the requested lesson.
+    setExpandedDays({ [focusDayNumber]: true });
+  }, [focusDayNumber]);
+
+  useEffect(() => {
+    if (!focusDayNumber || !expandedDays[focusDayNumber]) return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      // Wait for React to commit the expanded card before measuring and scrolling.
+      secondFrame = requestAnimationFrame(() => {
+        document.getElementById(`curriculum-day-card-${focusDayNumber}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        onFocusDayHandled?.();
+      });
     });
-    return () => cancelAnimationFrame(frame);
-  }, [focusDayNumber, onFocusDayHandled]);
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+    };
+  }, [focusDayNumber, expandedDays, onFocusDayHandled]);
 
   const toggleExpand = (dayNumber: number) => {
     setExpandedDays((prev) => ({
@@ -341,7 +356,8 @@ export const CurriculumTimeline: React.FC<CurriculumTimelineProps> = ({ onOpenAs
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
               Every day includes concept sessions, hands-on coding labs, practice drills, benchmark assessments, and clear expected outcomes.
             </p>
-            {canTrackProgress && <p className="mt-2 text-xs font-bold text-indigo-600 dark:text-indigo-300">Your progress: {completedCount} of 40 days complete</p>}
+            {canTrackProgress && <p className="mt-2 text-xs font-bold text-indigo-600 dark:text-indigo-300">{curriculumProgressLoading ? 'Loading your saved course progress…' : curriculumProgressError ? 'Saved course progress is unavailable.' : `Your progress: ${completedCount} of 40 days complete`}</p>}
+            {canTrackProgress && curriculumProgressError && <p role="alert" className="mt-1 text-xs text-rose-600 dark:text-rose-300">{curriculumProgressError}</p>}
           </div>
 
           <div className="flex items-center gap-2">
@@ -450,7 +466,7 @@ export const CurriculumTimeline: React.FC<CurriculumTimelineProps> = ({ onOpenAs
               <div
                 key={day.dayNumber}
                 id={`curriculum-day-card-${day.dayNumber}`}
-                className={`bg-white dark:bg-slate-900 rounded-2xl border transition-all overflow-hidden ${
+                className={`scroll-mt-16 bg-white dark:bg-slate-900 rounded-2xl border transition-all overflow-hidden ${
                   isCurrent
                     ? 'border-rose-300 dark:border-rose-900/60 shadow-md ring-1 ring-rose-500/20'
                     : isExpanded

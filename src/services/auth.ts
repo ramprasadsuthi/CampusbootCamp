@@ -13,6 +13,20 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export const getCurrentSession = () => request<AuthenticatedSession>('/api/auth/me');
 export const getBootstrapStatus = () => request<{ enabled: boolean; registrationEnabled: boolean; workspaceName: string }>('/api/auth/bootstrap-status');
 
+export function updateAccountProfile(params: { name: string; avatar?: string | null }) {
+  return request<{ user: AuthenticatedSession['user'] }>('/api/auth/profile', {
+    method: 'PATCH',
+    body: JSON.stringify(params),
+  });
+}
+
+export function changeAccountPassword(currentPassword: string, newPassword: string) {
+  return request<{ success: boolean }>('/api/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
+
 export function registerWorkspace(params: { workspaceName: string; name: string; email: string; password: string }) {
   return request<{ success: boolean }>('/api/auth/register-workspace', {
     method: 'POST',

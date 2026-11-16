@@ -15,6 +15,7 @@ import { CertificateModal } from './components/CertificateModal';
 import { AiInsightsModal } from './components/AiInsightsModal';
 import { AuthScreen } from './components/AuthScreen';
 import { WorkspaceMembers } from './components/WorkspaceMembers';
+import { AccountProfile } from './components/AccountProfile';
 import { archiveWorkspaceAssessment, createWorkspaceAssessment, createWorkspaceBatch, fetchBatches, fetchCurriculumProgress, fetchNotifications, fetchStudents, fetchWorkspaceAssessments, updateStudentRemarks, updateWorkspaceAssessment, updateWorkspaceBatch, updateWorkspaceStudent } from './services/api';
 import { getCurrentSession, getWorkspaceTrainers, signOut } from './services/auth';
 import { generateStudentReportPDF, exportBatchCSV } from './utils/pdfGenerator';
@@ -64,7 +65,11 @@ export default function App() {
   const [trainers, setTrainers] = useState<Array<{ id: string; name: string; email: string }>>([]);
   const [refreshRevision, setRefreshRevision] = useState(0);
   const [assessments, setAssessments] = useState<any[]>([]);
+  const [assessmentsLoading, setAssessmentsLoading] = useState(true);
+  const [assessmentsError, setAssessmentsError] = useState('');
   const [completedCurriculumDays, setCompletedCurriculumDays] = useState<number[]>([]);
+  const [curriculumProgressLoading, setCurriculumProgressLoading] = useState(true);
+  const [curriculumProgressError, setCurriculumProgressError] = useState('');
   const [notifications, setNotifications] = useState<any[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<StudentProfile>(EMPTY_STUDENT);
   const [darkMode, setDarkMode] = useState<boolean>(false);
@@ -89,13 +94,17 @@ export default function App() {
       setBatches([]);
       setTrainers([]);
       setAssessments([]);
+      setAssessmentsLoading(false);
+      setAssessmentsError('');
       setCompletedCurriculumDays([]);
+      setCurriculumProgressLoading(false);
+      setCurriculumProgressError('');
       setNotifications([]);
       setSelectedStudent(EMPTY_STUDENT);
       return;
     }
-    Promise.all([fetchStudents(), fetchBatches(), fetchNotifications(), fetchWorkspaceAssessments(), currentRole === 'admin' ? getWorkspaceTrainers() : Promise.resolve([]), currentRole === 'student' ? fetchCurriculumProgress() : Promise.resolve([])])
-      .then(([data, batchData, notificationData, assessmentData, trainerData, curriculumProgress]) => {
+    Promise.all([fetchStudents(), fetchBatches(), fetchNotifications(), currentRole === 'admin' ? getWorkspaceTrainers() : Promise.resolve([])])
+      .then(([data, batchData, notificationData, trainerData]) => {
         const profiles = Array.isArray(data) ? data : [];
         setStudents(profiles);
         setSelectedStudent((current) => profiles.find((student: StudentProfile) => student.id === current.id) || profiles[0] || EMPTY_STUDENT);
@@ -118,14 +127,58 @@ export default function App() {
           endDate: batch.completionDate,
         })));
         setNotifications(Array.isArray(notificationData) ? notificationData : []);
-        setAssessments(Array.isArray(assessmentData) ? assessmentData : []);
         setTrainers(Array.isArray(trainerData) ? trainerData : []);
-        setCompletedCurriculumDays(Array.isArray(curriculumProgress) ? curriculumProgress : []);
       })
       .catch((err) => {
         console.error('Failed to fetch workspace students:', err);
         if (err instanceof Error && err.message.includes('401')) setSession(null);
       });
+  }, [session?.workspace.id, session?.user.id, refreshRevision, currentRole]);
+
+  useEffect(() => {
+    if (!session) return;
+    let active = true;
+    setAssessmentsLoading(true);
+    setAssessmentsError('');
+    fetchWorkspaceAssessments()
+      .then((items) => {
+        if (!active) return;
+        setAssessments(Array.isArray(items) ? items : []);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setAssessments([]);
+        setAssessmentsError(error instanceof Error ? error.message : 'Could not load assessments.');
+        if (error instanceof Error && error.message.includes('401')) setSession(null);
+      })
+      .finally(() => { if (active) setAssessmentsLoading(false); });
+    return () => { active = false; };
+  }, [session?.workspace.id, session?.user.id, refreshRevision]);
+
+  useEffect(() => {
+    if (!session || currentRole !== 'student') {
+      setCompletedCurriculumDays([]);
+      setCurriculumProgressLoading(false);
+      setCurriculumProgressError('');
+      return;
+    }
+    let active = true;
+    setCurriculumProgressLoading(true);
+    setCurriculumProgressError('');
+    fetchCurriculumProgress()
+      .then((progress) => {
+        if (active) setCompletedCurriculumDays(Array.isArray(progress) ? progress : []);
+      })
+      .catch((error) => {
+        if (!active) return;
+        console.error('Failed to load saved curriculum progress:', error);
+        setCurriculumProgressError(error instanceof Error ? error.message : 'Could not load saved course progress.');
+        if (error instanceof Error && error.message.includes('401')) setSession(null);
+      })
+      .finally(() => {
+        if (active) setCurriculumProgressLoading(false);
+      });
+    return () => { active = false; };
   }, [session?.workspace.id, session?.user.id, refreshRevision, currentRole]);
 
   const handleCreateBatch = async (params: { name: string; trainerUserId?: string; startDate: string; completionDate: string }) => {
@@ -144,13 +197,65 @@ export default function App() {
   };
 
   const refreshCurriculumProgress = async () => {
-    const progress = await fetchCurriculumProgress();
-    setCompletedCurriculumDays(Array.isArray(progress) ? progress : []);
+    setCurriculumProgressLoading(true);
+    setCurriculumProgressError('');
+    try {
+      const progress = await fetchCurriculumProgress();
+      setCompletedCurriculumDays(Array.isArray(progress) ? progress : []);
+    } catch (error) {
+      setCurriculumProgressError(error instanceof Error ? error.message : 'Could not load saved course progress.');
+      throw error;
+    } finally {
+      setCurriculumProgressLoading(false);
+    }
   };
 
   const handleContinueCourse = (dayNumber: number) => {
     setCurriculumTargetDay(dayNumber);
     setActiveTab('curriculum');
+  };
+
+  const handleDownloadStudentReport = async () => {
+    if (currentRole !== 'student' || !session) {
+      generateStudentReportPDF(selectedStudent);
+      return;
+    }
+
+    const isAuthenticatedStudent = (profile: any) =>
+      profile && (
+        profile.userId === session.user.id
+        || profile.id === session.user.id
+        || (typeof profile.email === 'string' && profile.email.toLowerCase() === session.user.email.toLowerCase())
+      );
+    let ownProfile = students.find(isAuthenticatedStudent);
+    if (!ownProfile && isAuthenticatedStudent(selectedStudent)) ownProfile = selectedStudent;
+    try {
+      const ownProfiles = await fetchStudents();
+      ownProfile = ownProfiles.find(isAuthenticatedStudent)
+        // The student API is scoped to the authenticated user, so a sole returned row is safe as a final identity match.
+        || (ownProfiles.length === 1 ? ownProfiles[0] : ownProfile);
+    } catch (error) {
+      console.error('Could not refresh the authenticated student profile for the report:', error);
+    }
+
+    if (!ownProfile) {
+      window.alert('Your student profile could not be loaded, so the report was not downloaded. Refresh the page and try again.');
+      return;
+    }
+
+    const reportStudent: StudentProfile = {
+      ...EMPTY_STUDENT,
+      ...ownProfile,
+      id: session.user.id,
+      name: session.user.name.trim() || ownProfile.name || 'Student',
+      email: session.user.email.trim() || ownProfile.email || '',
+      metrics: { ...EMPTY_STUDENT.metrics, ...(ownProfile.metrics || {}) },
+      eligibility: Array.isArray(ownProfile.eligibility) ? ownProfile.eligibility : [],
+      weakAreas: Array.isArray(ownProfile.weakAreas) ? ownProfile.weakAreas : [],
+      strengths: Array.isArray(ownProfile.strengths) ? ownProfile.strengths : [],
+      recentRemarks: Array.isArray(ownProfile.recentRemarks) ? ownProfile.recentRemarks : [],
+    };
+    generateStudentReportPDF(reportStudent);
   };
 
   // Dark mode effect
@@ -236,17 +341,23 @@ export default function App() {
       case 'workspace':
         return session ? <WorkspaceMembers session={session} /> : null;
 
+      case 'account_profile':
+        return session ? <AccountProfile session={session} onSessionUpdated={setSession} /> : null;
+
       case 'dashboard':
         return (
           <DashboardLanding
             currentRole={currentRole}
             student={selectedStudent}
+            displayName={session?.user.name || ''}
             assessments={assessments}
             completedDayNumbers={completedCurriculumDays}
+            curriculumProgressLoading={curriculumProgressLoading}
+            curriculumProgressError={curriculumProgressError}
             onNavigate={(tab) => setActiveTab(tab)}
             onContinueCourse={handleContinueCourse}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
-            onDownloadReport={() => generateStudentReportPDF(selectedStudent)}
+            onDownloadReport={handleDownloadStudentReport}
             onOpenAiInsights={() => setShowAiModal(true)}
           />
         );
@@ -265,6 +376,8 @@ export default function App() {
             completedDayNumbers={completedCurriculumDays}
             canTrackProgress={currentRole === 'student'}
             onProgressRefresh={refreshCurriculumProgress}
+            curriculumProgressLoading={curriculumProgressLoading}
+            curriculumProgressError={curriculumProgressError}
             focusDayNumber={curriculumTargetDay}
             onFocusDayHandled={() => setCurriculumTargetDay(null)}
           />
@@ -274,6 +387,8 @@ export default function App() {
         return (
           <AssessmentList
             assessments={assessments}
+            assessmentsLoading={assessmentsLoading}
+            assessmentsError={assessmentsError}
             batches={batches}
             canManage={currentRole !== 'student'}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
@@ -290,7 +405,7 @@ export default function App() {
         return (
           <StudentProfileView
             student={selectedStudent}
-            onDownloadReport={() => generateStudentReportPDF(selectedStudent)}
+            onDownloadReport={handleDownloadStudentReport}
             onOpenAiInsights={() => setShowAiModal(true)}
           />
         );
@@ -432,12 +547,15 @@ export default function App() {
           <DashboardLanding
             currentRole={currentRole}
             student={selectedStudent}
+            displayName={session?.user.name || ''}
             assessments={assessments}
             completedDayNumbers={completedCurriculumDays}
+            curriculumProgressLoading={curriculumProgressLoading}
+            curriculumProgressError={curriculumProgressError}
             onNavigate={(tab) => setActiveTab(tab)}
             onContinueCourse={handleContinueCourse}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
-            onDownloadReport={() => generateStudentReportPDF(selectedStudent)}
+            onDownloadReport={handleDownloadStudentReport}
             onOpenAiInsights={() => setShowAiModal(true)}
           />
         );
@@ -473,6 +591,7 @@ export default function App() {
         currentRole={currentRole}
         session={session}
         onSignOut={handleSignOut}
+        onOpenAccountProfile={() => setActiveTab('account_profile')}
         students={students}
         selectedStudent={selectedStudent}
         onSelectStudent={(s) => setSelectedStudent(s)}

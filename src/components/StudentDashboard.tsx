@@ -5,8 +5,11 @@ import { Assessment, StudentProfile } from '../types';
 
 interface Props {
   student: StudentProfile;
+  displayName: string;
   assessments: Assessment[];
   completedDayNumbers: number[];
+  curriculumProgressLoading: boolean;
+  curriculumProgressError: string;
   onNavigate: (tab: string) => void;
   onContinueCourse: (dayNumber: number) => void;
   onOpenAssessment: (assessmentId: string) => void;
@@ -16,23 +19,27 @@ interface Props {
 const percent = (value: number) => Math.max(0, Math.min(100, Number(value) || 0));
 const dateLabel = (value?: string | null) => value ? new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
 
-export const StudentDashboard: React.FC<Props> = ({ student, assessments, completedDayNumbers, onNavigate, onContinueCourse, onOpenAssessment, onDownloadReport }) => {
+export const StudentDashboard: React.FC<Props> = ({ student, displayName, assessments, completedDayNumbers, curriculumProgressLoading, curriculumProgressError, onNavigate, onContinueCourse, onOpenAssessment, onDownloadReport }) => {
+  const greetingName = (displayName.trim() || student.name.trim())
+    .replace(/^No students enrolled yet$/i, '')
+    .split(/\s+/)[0] || 'there';
   const completed = new Set(completedDayNumbers);
   const completedCount = completed.size;
-  const nextDay = CURRICULUM_40_DAYS.find((day) => !completed.has(day.dayNumber));
+  const progressAvailable = !curriculumProgressLoading && !curriculumProgressError;
+  const nextDay = progressAvailable ? CURRICULUM_40_DAYS.find((day) => !completed.has(day.dayNumber)) : null;
   const submitted = assessments.filter((item) => item.studentStatus === 'submitted');
   const pending = assessments.filter((item) => item.status !== 'completed' && item.studentStatus !== 'submitted')
     .sort((a, b) => a.dayNumber - b.dayNumber).slice(0, 4);
   const metrics = [
     { label: 'Placement readiness', value: percent(student.placementReadinessScore), detail: 'Based on your current profile', icon: Target, color: 'text-indigo-600 bg-indigo-50' },
-    { label: 'Course progress', value: Math.round(completedCount / 40 * 100), detail: `${completedCount} of 40 days completed`, icon: BookOpen, color: 'text-blue-600 bg-blue-50' },
+    { label: 'Course progress', value: progressAvailable ? Math.round(completedCount / 40 * 100) : '—', detail: curriculumProgressLoading ? 'Loading your saved progress…' : curriculumProgressError ? 'Saved progress could not be loaded' : `${completedCount} of 40 days completed`, icon: BookOpen, color: 'text-blue-600 bg-blue-50' },
     { label: 'Assessments submitted', value: submitted.length, detail: `${assessments.length} available to you`, icon: FileCheck2, color: 'text-emerald-600 bg-emerald-50', plain: true },
     { label: 'Coding score', value: percent(student.metrics.coding), detail: 'Your latest recorded score', icon: Award, color: 'text-violet-600 bg-violet-50' },
   ];
 
   return <div className="space-y-6 animate-fadeIn">
     <section className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
-      <div><p className="text-sm font-medium text-indigo-600">Your placement preparation</p><h1 className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">Welcome back, {student.name.split(' ')[0]}</h1><p className="mt-1 text-sm text-slate-500">See your progress, next steps, and personal assessment status.</p></div>
+      <div><p className="text-sm font-medium text-indigo-600">Your placement preparation</p><h1 className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">Welcome back, {greetingName}</h1><p className="mt-1 text-sm text-slate-500">See your progress, next steps, and personal assessment status.</p></div>
       <button onClick={onDownloadReport} className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200">Download my report</button>
     </section>
 
@@ -41,15 +48,16 @@ export const StudentDashboard: React.FC<Props> = ({ student, assessments, comple
         <div className="flex items-center justify-between"><span className="text-sm font-medium text-slate-500">{label}</span><span className={`rounded-lg p-2 ${color}`}><Icon size={18} /></span></div>
         <div className="mt-3 flex items-baseline gap-1"><strong className="text-3xl text-slate-900 dark:text-white">{value}</strong>{!plain && <span className="text-lg text-slate-500">%</span>}</div>
         <p className="mt-1 text-xs text-slate-500">{detail}</p>
-        {!plain && <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-indigo-600" style={{ width: `${value}%` }} /></div>}
+        {!plain && value !== '—' && <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-indigo-600" style={{ width: `${value}%` }} /></div>}
       </article>)}
     </section>
 
     <section className="grid grid-cols-1 gap-5 xl:grid-cols-3">
       <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-2 dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-semibold text-indigo-600">YOUR NEXT STEP</p><h2 className="mt-1 text-xl font-bold text-slate-900 dark:text-white">{nextDay ? `Day ${nextDay.dayNumber}: ${nextDay.topic}` : '40-day course complete'}</h2><p className="mt-2 text-sm text-slate-500">{nextDay ? `${nextDay.phaseName} · ${nextDay.expectedOutcome}` : 'You have completed every day in the course roadmap.'}</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">{completedCount}/40 days</span></div>
-        <div className="mt-5 h-2 rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-indigo-600" style={{ width: `${Math.round(completedCount / 40 * 100)}%` }} /></div>
-        <button onClick={() => nextDay ? onContinueCourse(nextDay.dayNumber) : onNavigate('curriculum')} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700">{nextDay ? 'Continue course' : 'Review course'} <ArrowRight size={16} /></button>
+        <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-semibold text-indigo-600">YOUR NEXT STEP</p><h2 className="mt-1 text-xl font-bold text-slate-900 dark:text-white">{!progressAvailable ? curriculumProgressLoading ? 'Loading saved course progress…' : 'Course progress unavailable' : nextDay ? `Day ${nextDay.dayNumber}: ${nextDay.topic}` : '40-day course complete'}</h2><p className="mt-2 text-sm text-slate-500">{!progressAvailable ? curriculumProgressError || 'We’re retrieving your saved day status.' : nextDay ? `${nextDay.phaseName} · ${nextDay.expectedOutcome}` : 'You have completed every day in the course roadmap.'}</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">{progressAvailable ? `${completedCount}/40 days` : '—/40 days'}</span></div>
+        <div className="mt-5 h-2 rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-indigo-600" style={{ width: `${progressAvailable ? Math.round(completedCount / 40 * 100) : 0}%` }} /></div>
+        {curriculumProgressError && <p role="alert" className="mt-3 text-xs font-medium text-rose-600">Could not load your saved course progress. Refresh the page to retry.</p>}
+        <button onClick={() => progressAvailable && nextDay ? onContinueCourse(nextDay.dayNumber) : onNavigate('curriculum')} className="mt-5 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700">{!progressAvailable ? 'Open curriculum' : nextDay ? 'Continue course' : 'Review course'} <ArrowRight size={16} /></button>
       </article>
       <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"><h2 className="font-bold text-slate-900 dark:text-white">Your skill scores</h2><p className="mt-1 text-xs text-slate-500">Personal scores currently recorded</p><div className="mt-4 space-y-3">{[['Coding', student.metrics.coding], ['Aptitude', student.metrics.aptitude], ['Reasoning', student.metrics.reasoning], ['Communication', student.metrics.communication]].map(([name, score]) => <div key={String(name)}><div className="mb-1 flex justify-between text-sm"><span className="text-slate-600 dark:text-slate-300">{name}</span><b className="text-slate-900 dark:text-white">{percent(Number(score))}%</b></div><div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-full rounded-full bg-indigo-500" style={{ width: `${percent(Number(score))}%` }} /></div></div>)}</div></article>
     </section>
