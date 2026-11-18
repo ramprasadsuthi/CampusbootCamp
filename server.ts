@@ -1250,6 +1250,47 @@ const applySharedContentHandler = async (req: Request, res: Response, rollbackOn
 app.post('/api/platform/content/versions/:id/apply', requirePlatformAdmin, (req, res) => applySharedContentHandler(req, res));
 app.post('/api/platform/content/versions/:id/rollback', requirePlatformAdmin, (req, res) => applySharedContentHandler(req, res, true));
 
+app.get('/api/platform/subscription-history', requirePlatformAdmin, async (req, res) => {
+  const workspaceId = String(req.query.workspaceId || '').trim();
+  const status = String(req.query.status || '').trim();
+  const dateFrom = String(req.query.dateFrom || '').trim();
+  const dateTo = String(req.query.dateTo || '').trim();
+  const exportAll = req.query.export === '1';
+  const validStatuses = ['not_configured', 'trialing', 'active', 'past_due', 'canceled', 'suspended'];
+  const isDate = (value: string) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if ((status && !validStatuses.includes(status)) || !isDate(dateFrom) || !isDate(dateTo) || (dateFrom && dateTo && dateFrom > dateTo)) return res.status(400).json({ error: 'Choose valid status and date filters.' });
+  const filters = ["a.action = 'workspace.subscription_updated'"];
+  const params: any[] = [];
+  if (workspaceId) { filters.push('a.targetId = ?'); params.push(workspaceId); }
+  if (status) { filters.push("JSON_UNQUOTE(JSON_EXTRACT(a.afterJson, '$.status')) = ?"); params.push(status); }
+  if (dateFrom) { filters.push("a.createdAt >= CONCAT(?, ' 00:00:00')"); params.push(dateFrom); }
+  if (dateTo) { filters.push("a.createdAt < DATE_ADD(CONCAT(?, ' 00:00:00'), INTERVAL 1 DAY)"); params.push(dateTo); }
+  const where = `WHERE ${filters.join(' AND ')}`;
+  const parsedOffset = Number.parseInt(String(req.query.offset || '0'), 10);
+  const offset = Number.isFinite(parsedOffset) ? Math.min(100000, Math.max(0, parsedOffset)) : 0;
+  const limit = exportAll ? 10000 : 50;
+  try {
+    const [totals]: any = await pool.execute(`SELECT COUNT(*) AS total FROM PlatformAuditEvents a ${where}`, params);
+    const [rows]: any = await pool.execute(
+      `SELECT a.id, a.targetId AS workspaceId, w.name AS workspaceName, a.reason,
+              DATE_FORMAT(a.createdAt, '%Y-%m-%d %H:%i:%s') AS changedAt,
+              COALESCE(actor.name, 'Former platform admin') AS actorName, actor.email AS actorEmail,
+              a.beforeJson, a.afterJson
+       FROM PlatformAuditEvents a
+       JOIN Workspaces w ON w.id = a.targetId
+       LEFT JOIN PlatformAdminAccounts actor ON actor.id = a.platformAdminId
+       ${where}
+       ORDER BY a.createdAt DESC, a.id DESC LIMIT ${limit}${exportAll ? '' : ' OFFSET ?'}`,
+      exportAll ? params : [...params, offset],
+    );
+    const items = rows.map((row: any) => ({ ...row, before: parseStoredJson<Record<string, unknown>>(row.beforeJson, {}), after: parseStoredJson<Record<string, unknown>>(row.afterJson, {}) }));
+    res.json({ items, total: Number(totals[0]?.total || 0), offset: exportAll ? 0 : offset, limit });
+  } catch (error) {
+    console.error('Subscription history query failed:', error);
+    res.status(500).json({ error: 'Could not load subscription change history.' });
+  }
+});
+
 app.get('/api/platform/audit', requirePlatformAdmin, async (req, res) => {
   const query = String(req.query.q || '').trim().slice(0, 120);
   const action = String(req.query.action || '').trim().slice(0, 100);

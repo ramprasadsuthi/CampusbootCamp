@@ -3,6 +3,7 @@ export interface PlatformWorkspace {
   statusReason: string; createdAt: string; planId: string; subscriptionStatus: string; activeStudents: number; staffCount: number;
 }
 export interface PlatformPlan { id: 'pilot' | 'campus' | 'campus_plus'; name: string; description: string; limits: Array<{ key: 'active_students' | 'trainer_seats' | 'active_batches' | 'ai_credits_per_period'; value: number | null; unit: 'students' | 'seats' | 'batches' | 'credits' }>; features: string[]; isActive: boolean; updatedAt: string; }
+export interface PlatformSubscriptionChange { id: string; workspaceId: string; workspaceName: string; reason: string; changedAt: string; actorName: string; actorEmail: string | null; before: Record<string, unknown>; after: Record<string, unknown>; }
 
 async function platformRequest<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options?.headers } });
@@ -18,6 +19,7 @@ export const getPlatformOverview = () => platformRequest<any>('/api/platform/ove
 export const getPlatformPlans = () => platformRequest<PlatformPlan[]>('/api/platform/plans');
 export const savePlatformPlan = (id: PlatformPlan['id'], payload: Omit<PlatformPlan, 'id' | 'updatedAt'> & { reason: string }) => platformRequest<{ success: boolean; id: string }>(`/api/platform/plans/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) });
 export const updatePlatformWorkspaceSubscription = (workspaceId: string, payload: { planId: PlatformPlan['id']; status: string; currentPeriodStart: string | null; currentPeriodEnd: string | null; internalNote: string; reason: string }) => platformRequest<{ success: boolean; workspaceName: string }>(`/api/platform/workspaces/${encodeURIComponent(workspaceId)}/subscription`, { method: 'PUT', body: JSON.stringify(payload) });
+export const getPlatformSubscriptionHistory = (filters: { workspaceId?: string; status?: string; dateFrom?: string; dateTo?: string; offset?: number; export?: boolean } = {}) => platformRequest<{ items: PlatformSubscriptionChange[]; total: number; offset: number; limit: number }>(`/api/platform/subscription-history?${new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string | number] => entry[1] !== undefined && entry[1] !== '').map(([key, value]) => [key, String(value)]))}`);
 export interface SharedMaterialDraft { id: string; dayNumber: number; title: string; materialType: 'video' | 'text' | 'pdf'; contentUrl: string | null; contentText: string | null; contentFormat: 'markdown' | 'html'; position: number; isRequired: boolean; }
 export interface SharedContentVersion { id: string; versionNumber: number; title: string; status: 'draft' | 'published'; createdAt: string; publishedAt: string | null; createdBy: string | null; publishedBy: string | null; appliedWorkspaceCount: number; materialCount: number; assessmentCount: number; }
 export interface SharedAssessmentTemplateSummary { id: string; dayNumber: number; title: string; type: string; durationMinutes: number; totalMarks: number; questionCount: number; }

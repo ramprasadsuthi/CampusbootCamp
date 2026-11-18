@@ -13,6 +13,7 @@ The original college workflows use tenant-scoped workspace sessions. A separate 
 - The platform overview flags onboarding older than seven days, current college-admin invites that have expired or expire within 24 hours, and student/trainer/batch capacity at 80% or more of the assigned planning limit. Alerts link to workspace details; 90% and 100% capacity are raised to higher severity.
 - The Shared content library stores versioned releases of common Day 1–40 video/PDF/text materials and built-in sample assessment templates. Platform admins edit drafts, publish with a reason, then explicitly apply a published release to selected onboarding or active colleges with a reason. Its application history records the college, release, actor, timestamp, reason, and item counts, with college/date filters. A rollout view compares each college's current release with the latest published release and flags current, behind, and not-applied colleges. A rollback reapplies an earlier published release as a new history entry; shared items absent from that version are archived (not deleted), preserving student material progress and assessment submissions. College-customized items are preserved.
 - The Plans & subscriptions page stores editable Pilot, Campus, and Campus Plus names, descriptions, feature sets, and usage limits without prices. Platform admins can manually set each college's plan, subscription state, start/end dates, and platform-only internal note; both plan and subscription changes require a reason and write before/after audit records. Plan limits and features are loaded from the database by current server-side quota and feature checks.
+- Subscription change history provides college, resulting-status, and date-range filters, shows the actor/reason and before/after plan, term, status, and internal-note values, and exports the filtered rows as CSV.
 - College sign-in is blocked for suspended or archived workspaces, and their existing sessions are revoked when the state changes.
 - `src/types/subscriptions.ts` and `PRODUCT_SCOPE.md` still define the broader permission and product policy groundwork.
 - `WorkspaceSubscriptions` stores each college's plan, status, interval, term dates, and private platform-admin note. College admins can view their own subscription and usage; the internal note is excluded from their API response.
@@ -110,7 +111,7 @@ The current `WorkspaceSubscriptions.planId` enum will need a careful migration t
 2. Add suspend/reactivate/archive actions with required reason, confirmation, and audit history.
 3. Migrate plan definitions out of the enum/static-only catalog into database-backed records. **Implemented.**
 4. Add plan assignment and manual subscription-state/term controls with audit records. **Implemented.**
-5. Add a dedicated subscription change history and exports.
+5. Add subscription change history, filters, and exports. **Implemented.**
 
 ### Stage D — Plans, shared content, and support operations
 
@@ -120,7 +121,7 @@ The current `WorkspaceSubscriptions.planId` enum will need a careful migration t
 
 ## First implementation slice
 
-**Stages A and the initial Stage B slice are implemented**, along with shared content versioning and publishing, and database-backed plan configuration/manual subscription administration: dedicated platform-admin sign-in, mandatory MFA, platform-only authorization, audit logging, workspace overview/directory, onboarding provisioning, a workspace detail page, and the shared content library. Do not expose student records in this foundation. The remaining delivery sequence is subscription change history/exports, approved commercial terms and billing integration, and audited support tooling.
+**Stages A and the initial Stage B slice are implemented**, along with shared content versioning/publishing, database-backed plan configuration, manual subscription administration, and filtered subscription history/export: dedicated platform-admin sign-in, mandatory MFA, platform-only authorization, audit logging, workspace overview/directory, onboarding provisioning, a workspace detail page, and the shared content library. Do not expose student records in this foundation. The remaining delivery sequence is approved commercial terms and billing integration, and audited support tooling.
 
 ## Decisions needed before subscription controls
 
