@@ -35,11 +35,13 @@ export const AiInsightsModal: React.FC<AiInsightsModalProps> = ({
   const [selectedCompany, setSelectedCompany] = useState<string>('TCS NQT');
   const [predictionData, setPredictionData] = useState<any>(null);
   const [trainerSummary, setTrainerSummary] = useState<string>('');
+  const [aiError, setAiError] = useState('');
 
   if (!isOpen) return null;
 
   const handleRunDoctor = async () => {
     setLoading(true);
+    setAiError('');
     try {
       const res = await fetchAiRecommendations({
         studentName: student.name,
@@ -57,6 +59,7 @@ export const AiInsightsModal: React.FC<AiInsightsModalProps> = ({
       setDoctorResponse(res.recommendation);
     } catch (e) {
       console.error(e);
+      setAiError(e instanceof Error ? e.message : 'Could not generate the AI recommendation.');
     } finally {
       setLoading(false);
     }
@@ -64,6 +67,7 @@ export const AiInsightsModal: React.FC<AiInsightsModalProps> = ({
 
   const handlePredictCompany = async () => {
     setLoading(true);
+    setAiError('');
     try {
       const res = await predictCompanyReadiness({
         studentName: student.name,
@@ -73,6 +77,7 @@ export const AiInsightsModal: React.FC<AiInsightsModalProps> = ({
       setPredictionData(res);
     } catch (e) {
       console.error(e);
+      setAiError(e instanceof Error ? e.message : 'Could not generate the readiness prediction.');
     } finally {
       setLoading(false);
     }
@@ -80,6 +85,7 @@ export const AiInsightsModal: React.FC<AiInsightsModalProps> = ({
 
   const handleGenerateTrainerNotes = async () => {
     setLoading(true);
+    setAiError('');
     try {
       const res = await generateTrainerSummary({
         batchName: student.batch,
@@ -90,6 +96,7 @@ export const AiInsightsModal: React.FC<AiInsightsModalProps> = ({
       setTrainerSummary(res.summary);
     } catch (e) {
       console.error(e);
+      setAiError(e instanceof Error ? e.message : 'Could not generate trainer notes.');
     } finally {
       setLoading(false);
     }
@@ -155,6 +162,7 @@ export const AiInsightsModal: React.FC<AiInsightsModalProps> = ({
 
         {/* Body Content */}
         <div className="p-6 overflow-y-auto space-y-4 flex-1">
+          {aiError && <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">{aiError}</p>}
           {/* Tab 1: AI Remediation Doctor */}
           {activeTab === 'doctor' && (
             <div className="space-y-4">

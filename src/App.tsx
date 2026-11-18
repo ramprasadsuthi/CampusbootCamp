@@ -16,11 +16,17 @@ import { AiInsightsModal } from './components/AiInsightsModal';
 import { AuthScreen } from './components/AuthScreen';
 import { WorkspaceMembers } from './components/WorkspaceMembers';
 import { AccountProfile } from './components/AccountProfile';
+import { StudentInterviewResults } from './components/StudentInterviewResults';
+import { SystemSettings } from './components/SystemSettings';
+import { InterviewSchedules } from './components/InterviewSchedules';
+import { PanelistInterviewPortal } from './components/PanelistInterviewPortal';
+import { AdminReports } from './components/AdminReports';
+import { SubscriptionUsage } from './components/SubscriptionUsage';
 import { archiveWorkspaceAssessment, createWorkspaceAssessment, createWorkspaceBatch, fetchBatches, fetchCurriculumProgress, fetchNotifications, fetchStudents, fetchWorkspaceAssessments, updateStudentRemarks, updateWorkspaceAssessment, updateWorkspaceBatch, updateWorkspaceStudent } from './services/api';
-import { getCurrentSession, getWorkspaceTrainers, signOut } from './services/auth';
-import { generateStudentReportPDF, exportBatchCSV } from './utils/pdfGenerator';
+import { getCurrentSession, getWorkspaceSettings, getWorkspaceTrainers, markWorkspaceNotificationRead, signOut } from './services/auth';
+import { generateStudentReportPDF } from './utils/pdfGenerator';
 import { BatchInfo, StudentProfile, UserRole } from './types';
-import { AuthenticatedSession } from './types/auth';
+import { AuthenticatedSession, DEFAULT_WORKSPACE_SETTINGS, WorkspaceSettings } from './types/auth';
 import {
   Bell,
   CheckCircle2,
@@ -72,6 +78,8 @@ export default function App() {
   const [curriculumProgressError, setCurriculumProgressError] = useState('');
   const [notifications, setNotifications] = useState<any[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<StudentProfile>(EMPTY_STUDENT);
+  const [directoryFilters, setDirectoryFilters] = useState({ batchId: 'all', tierFilter: 'all' });
+  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings>(DEFAULT_WORKSPACE_SETTINGS);
   const [darkMode, setDarkMode] = useState<boolean>(false);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [activeAssessmentId, setActiveAssessmentId] = useState<string | null>(null);
@@ -81,11 +89,27 @@ export default function App() {
   const currentRole: UserRole = session?.role === 'college_admin' ? 'admin' : session?.role || 'student';
 
   useEffect(() => {
+    if (session?.role === 'panelist' && activeTab === 'dashboard') setActiveTab('panelist_interviews');
+  }, [session?.role, activeTab]);
+
+  useEffect(() => {
     getCurrentSession()
       .then(setSession)
       .catch(() => setSession(null))
       .finally(() => setAuthLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!session || session.role !== 'college_admin') {
+      setWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS);
+      return;
+    }
+    let active = true;
+    getWorkspaceSettings()
+      .then(({ settings }) => { if (active) setWorkspaceSettings(settings); })
+      .catch((error) => console.error('Could not load workspace settings:', error));
+    return () => { active = false; };
+  }, [session?.workspace.id, session?.role]);
 
   // Load only the profiles permitted by the active workspace membership.
   useEffect(() => {
@@ -101,6 +125,11 @@ export default function App() {
       setCurriculumProgressError('');
       setNotifications([]);
       setSelectedStudent(EMPTY_STUDENT);
+      return;
+    }
+    if (session.role === 'panelist') {
+      setStudents([]); setBatches([]); setTrainers([]); setSelectedStudent(EMPTY_STUDENT);
+      fetchNotifications().then((items) => setNotifications(Array.isArray(items) ? items : [])).catch(() => setNotifications([]));
       return;
     }
     Promise.all([fetchStudents(), fetchBatches(), fetchNotifications(), currentRole === 'admin' ? getWorkspaceTrainers() : Promise.resolve([])])
@@ -137,6 +166,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
+    if (session.role === 'panelist') { setAssessments([]); setAssessmentsLoading(false); setAssessmentsError(''); return; }
     let active = true;
     setAssessmentsLoading(true);
     setAssessmentsError('');
@@ -215,6 +245,21 @@ export default function App() {
     setActiveTab('curriculum');
   };
 
+  const handleDashboardNavigate = (tab: string) => {
+    if (tab === 'students' || tab === 'batches') setDirectoryFilters({ batchId: 'all', tierFilter: 'all' });
+    setActiveTab(tab);
+  };
+
+  const handleOpenAtRiskStudents = () => {
+    setDirectoryFilters({ batchId: 'all', tierFilter: 'at_risk' });
+    setActiveTab('students');
+  };
+
+  const handleOpenBatchStudents = (batchId: string) => {
+    setDirectoryFilters({ batchId, tierFilter: 'all' });
+    setActiveTab('batches');
+  };
+
   const handleDownloadStudentReport = async () => {
     if (currentRole !== 'student' || !session) {
       generateStudentReportPDF(selectedStudent);
@@ -272,7 +317,7 @@ export default function App() {
     getCurrentSession()
       .then((currentSession) => {
         setSession(currentSession);
-        setActiveTab('dashboard');
+        setActiveTab(currentSession.role === 'panelist' ? 'panelist_interviews' : 'dashboard');
       })
       .catch(() => setSession(null))
       .finally(() => setAuthLoading(false));
@@ -289,6 +334,25 @@ export default function App() {
   const handleCreateAssessment = async (params: Parameters<typeof createWorkspaceAssessment>[0]) => {
     const assessment = await createWorkspaceAssessment(params);
     setAssessments((current) => [...current, assessment].sort((a, b) => a.dayNumber - b.dayNumber));
+  };
+
+  const handleMarkNotificationRead = async (id: string) => {
+    try {
+      await markWorkspaceNotificationRead(id);
+      setNotifications((current) => current.map((notification) => notification.id === id ? { ...notification, unread: false } : notification));
+    } catch (error) {
+      console.error('Could not mark notification as read:', error);
+    }
+  };
+
+  const handleOpenPlacementNotification = (id: string) => {
+    void handleMarkNotificationRead(id);
+    setShowNotifications(false);
+    setActiveTab('interviews');
+    window.setTimeout(() => {
+      window.dispatchEvent(new Event('placement-outcomes-refresh'));
+      window.setTimeout(() => document.getElementById('student-placement-progress')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+    }, 150);
   };
 
   const handleUpdateAssessment = async (id: string, params: Parameters<typeof updateWorkspaceAssessment>[1]) => {
@@ -349,16 +413,22 @@ export default function App() {
           <DashboardLanding
             currentRole={currentRole}
             student={selectedStudent}
+            students={students}
+            batches={batches}
             displayName={session?.user.name || ''}
             assessments={assessments}
+            settings={workspaceSettings}
             completedDayNumbers={completedCurriculumDays}
             curriculumProgressLoading={curriculumProgressLoading}
             curriculumProgressError={curriculumProgressError}
-            onNavigate={(tab) => setActiveTab(tab)}
+            onNavigate={handleDashboardNavigate}
             onContinueCourse={handleContinueCourse}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
             onDownloadReport={handleDownloadStudentReport}
             onOpenAiInsights={() => setShowAiModal(true)}
+            onOpenStudent={(student) => { setSelectedStudent(student); setActiveTab('student_profile'); }}
+            onOpenAtRiskStudents={handleOpenAtRiskStudents}
+            onOpenBatch={handleOpenBatchStudents}
           />
         );
 
@@ -411,6 +481,13 @@ export default function App() {
         );
 
       case 'interviews':
+        return currentRole === 'student'
+          ? <StudentInterviewResults studentId={session.user.id} />
+          : <InterviewPanel students={students} initialType="tech" onUpdateStudentRemarks={handleUpdateRemarks} evaluatorName={session.user.name} />;
+
+      case 'panelist_interviews':
+        return <PanelistInterviewPortal />;
+
       case 'eval_tech':
         return (
           <InterviewPanel
@@ -442,6 +519,10 @@ export default function App() {
             batches={batches}
             trainers={trainers}
             canManage={currentRole === 'admin'}
+            initialBatchId={directoryFilters.batchId}
+            initialTierFilter={directoryFilters.tierFilter}
+            atRiskBelow={workspaceSettings.atRiskBelow}
+            tierOneAtOrAbove={workspaceSettings.tierOneAtOrAbove}
             onCreateBatch={handleCreateBatch}
             onUpdateBatch={handleUpdateBatch}
             onAssignStudent={handleAssignStudent}
@@ -457,106 +538,44 @@ export default function App() {
         return <CertificateModal student={selectedStudent} />;
 
       case 'reports':
-        return (
-          <div className="space-y-6 animate-fadeIn">
-            <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-8 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-4">
-              <h1 className="text-2xl font-extrabold text-slate-900 dark:text-white">
-                Export Placement Dossiers & Batch Reports
-              </h1>
-              <p className="text-xs text-slate-500 max-w-2xl">
-                Download verified individual student dossiers with comprehensive competency scores, trainer endorsement remarks, and batch-wide placement statistics.
-              </p>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4">
-                <div className="p-6 rounded-2xl bg-indigo-50/60 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900/60 space-y-3">
-                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                    Current Candidate Dossier (PDF)
-                  </h3>
-                  <p className="text-xs text-slate-600 dark:text-slate-300">
-                    Comprehensive verified dossier for <strong>{selectedStudent.name}</strong> ({selectedStudent.rollNo}) including 9-domain matrix and company eligibility.
-                  </p>
-                  <button
-                    onClick={() => generateStudentReportPDF(selectedStudent)}
-                    className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md cursor-pointer transition-all"
-                  >
-                    Generate Candidate PDF
-                  </button>
-                </div>
-
-                <div className="p-6 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/40 border border-emerald-100 dark:border-emerald-900/60 space-y-3">
-                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                    Master Batch Export (CSV / Excel)
-                  </h3>
-                  <p className="text-xs text-slate-600 dark:text-slate-300">
-                    Full spreadsheet export containing all enrolled candidates across CS, IT, and ECE batches with attendance and assessment metrics.
-                  </p>
-                  <button
-                    onClick={() => exportBatchCSV('Campus_Placement_Master_Report', students)}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-md cursor-pointer transition-all"
-                  >
-                    Export Master CSV
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
+        return currentRole === 'admin'
+          ? <AdminReports students={students} batches={batches} selectedStudent={selectedStudent} atRiskBelow={workspaceSettings.atRiskBelow} tierOneAtOrAbove={workspaceSettings.tierOneAtOrAbove} />
+          : null;
 
       case 'settings':
-      case 'interviews_sched':
-        return (
-          <div className="space-y-6 animate-fadeIn">
-            <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-8 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-6">
-              <div>
-                <h1 className="text-2xl font-extrabold text-slate-900 dark:text-white">
-                  Assessment Engine & System Configuration
-                </h1>
-                <p className="text-xs text-slate-500 mt-1">
-                  Configure target company drive cutoffs, assessment timing constraints, and rubric weights.
-                </p>
-              </div>
+        return currentRole === 'admin'
+          ? <SystemSettings settings={workspaceSettings} onSaved={setWorkspaceSettings} />
+          : null;
 
-              <div className="space-y-4 max-w-xl text-xs">
-                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-800 dark:text-slate-200">
-                      TCS NQT Tier 1 Cutoff
-                    </span>
-                    <span className="font-bold text-indigo-600">80%</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-800 dark:text-slate-200">
-                      Infosys SP Coding Benchmark
-                    </span>
-                    <span className="font-bold text-indigo-600">85%</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-800 dark:text-slate-200">
-                      Accenture FSE Aptitude Cutoff
-                    </span>
-                    <span className="font-bold text-indigo-600">75%</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
+      case 'subscription':
+        return currentRole === 'admin' ? <SubscriptionUsage /> : null;
+
+      case 'interviews_sched':
+        return currentRole === 'admin'
+          ? <InterviewSchedules students={students} defaultDurationMinutes={workspaceSettings.defaultInterviewDurationMinutes} />
+          : null;
 
       default:
         return (
           <DashboardLanding
             currentRole={currentRole}
             student={selectedStudent}
+            students={students}
+            batches={batches}
             displayName={session?.user.name || ''}
             assessments={assessments}
+            settings={workspaceSettings}
             completedDayNumbers={completedCurriculumDays}
             curriculumProgressLoading={curriculumProgressLoading}
             curriculumProgressError={curriculumProgressError}
-            onNavigate={(tab) => setActiveTab(tab)}
+            onNavigate={handleDashboardNavigate}
             onContinueCourse={handleContinueCourse}
             onOpenAssessment={(id) => setActiveAssessmentId(id)}
             onDownloadReport={handleDownloadStudentReport}
             onOpenAiInsights={() => setShowAiModal(true)}
+            onOpenStudent={(student) => { setSelectedStudent(student); setActiveTab('student_profile'); }}
+            onOpenAtRiskStudents={handleOpenAtRiskStudents}
+            onOpenBatch={handleOpenBatchStudents}
           />
         );
     }
@@ -668,6 +687,16 @@ export default function App() {
                     <span className="text-[10px] text-slate-400 block pt-1">
                       {n.time}
                     </span>
+                    {currentRole === 'student' && n.notificationType === 'placement_outcome' && (
+                      <button onClick={() => handleOpenPlacementNotification(n.id)} className="pt-1 text-[10px] font-bold text-emerald-700 hover:text-emerald-900 dark:text-emerald-400">
+                        View placement progress
+                      </button>
+                    )}
+                    {n.notificationType === 'interview_schedule' && n.unread && (
+                      <button onClick={() => void handleMarkNotificationRead(n.id)} className="pt-1 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 dark:text-indigo-400">
+                        Mark as read
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>

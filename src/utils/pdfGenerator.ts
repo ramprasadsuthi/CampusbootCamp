@@ -1,5 +1,6 @@
 import jsPDF from 'jspdf';
 import { StudentProfile } from '../types';
+import { WorkspaceActivityRow } from '../types/reports';
 
 export function generateStudentReportPDF(student: StudentProfile) {
   const doc = new jsPDF({
@@ -189,7 +190,25 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.save(`${student.name.replace(/\s+/g, '_')}_Placement_Readiness_Report.pdf`);
 }
 
-export function exportBatchCSV(batchName: string, students: StudentProfile[]) {
+function downloadCsv(filename: string, rows: unknown[][]) {
+  const csvCell = (value: unknown) => {
+    let text = String(value ?? '');
+    if (/^[=+@\-\t\r]/.test(text)) text = `'${text}`;
+    return `"${text.replace(/"/g, '""')}"`;
+  };
+  const csvContent = rows.map((row) => row.map(csvCell).join(',')).join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', filename);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+export function exportBatchCSV(batchName: string, students: StudentProfile[], criteria: Array<[string, string]> = []) {
   const headers = [
     'Roll No',
     'Name',
@@ -209,10 +228,10 @@ export function exportBatchCSV(batchName: string, students: StudentProfile[]) {
 
   const rows = students.map((s) => [
     s.rollNo,
-    `"${s.name}"`,
+    s.name,
     s.email,
-    `"${s.college}"`,
-    `"${s.branch}"`,
+    s.college,
+    s.branch,
     s.attendancePercent,
     s.placementReadinessScore,
     s.metrics.coding,
@@ -224,13 +243,23 @@ export function exportBatchCSV(batchName: string, students: StudentProfile[]) {
     s.placementReadinessScore >= 80 ? 'Tier 1 Ready' : s.placementReadinessScore >= 65 ? 'Tier 2 Ready' : 'Needs Intervention',
   ]);
 
-  const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.setAttribute('href', url);
-  link.setAttribute('download', `${batchName.replace(/\s+/g, '_')}_Placement_Report.csv`);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  const metadata: unknown[][] = [['Report', 'Placement readiness'], ...criteria.map(([key, value]) => [key, value]), []];
+  downloadCsv(`${batchName.replace(/[^a-z0-9_-]+/gi, '_')}_Placement_Report.csv`, [...metadata, headers, ...rows]);
+}
+
+export function exportActivityReportCSV(reportName: string, activities: WorkspaceActivityRow[], criteria: Array<[string, string]>) {
+  const headers = ['Activity date', 'Activity type', 'Activity', 'Student', 'Roll no', 'Batch', 'Score %', 'Readiness %', 'Outcome'];
+  const rows = activities.map((item) => [
+    item.activityDate,
+    item.activityType.replaceAll('_', ' '),
+    item.activityName,
+    item.studentName,
+    item.rollNo,
+    item.batchName,
+    item.score === null ? '' : item.score,
+    item.readinessScore,
+    item.outcome,
+  ]);
+  const metadata: unknown[][] = [['Report', reportName], ...criteria.map(([key, value]) => [key, value]), []];
+  downloadCsv(`${reportName.replace(/[^a-z0-9_-]+/gi, '_')}.csv`, [...metadata, headers, ...rows]);
 }

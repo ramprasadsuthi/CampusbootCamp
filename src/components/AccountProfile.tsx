@@ -41,6 +41,7 @@ function resizeProfileImage(file: File): Promise<string> {
 const roleLabel: Record<AuthenticatedSession['role'], string> = {
   college_admin: 'College administrator',
   trainer: 'Trainer',
+  panelist: 'Interview panelist',
   student: 'Student',
 };
 

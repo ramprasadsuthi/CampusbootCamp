@@ -18,6 +18,10 @@ interface BatchManagerProps {
   batches: BatchInfo[];
   trainers: Array<{ id: string; name: string; email: string }>;
   canManage: boolean;
+  initialBatchId?: string;
+  initialTierFilter?: string;
+  atRiskBelow: number;
+  tierOneAtOrAbove: number;
   onCreateBatch: (params: { name: string; trainerUserId?: string; startDate: string; completionDate: string }) => Promise<void>;
   onUpdateBatch: (id: string, params: { name?: string; trainerUserId?: string | null; startDate?: string; completionDate?: string; currentDay?: number; isArchived?: boolean }) => Promise<void>;
   onAssignStudent: (studentId: string, batchId: string | null) => Promise<void>;
@@ -30,15 +34,19 @@ export const BatchManager: React.FC<BatchManagerProps> = ({
   batches,
   trainers,
   canManage,
+  initialBatchId = 'all',
+  initialTierFilter = 'all',
+  atRiskBelow,
+  tierOneAtOrAbove,
   onCreateBatch,
   onUpdateBatch,
   onAssignStudent,
   onSelectStudent,
   onNavigateToProfile,
 }) => {
-  const [selectedBatchId, setSelectedBatchId] = useState<string>('all');
+  const [selectedBatchId, setSelectedBatchId] = useState<string>(initialBatchId);
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [tierFilter, setTierFilter] = useState<string>('all');
+  const [tierFilter, setTierFilter] = useState<string>(initialTierFilter);
   const [batchEditor, setBatchEditor] = useState<BatchInfo | 'new' | null>(null);
   const [batchName, setBatchName] = useState('');
   const [trainerUserId, setTrainerUserId] = useState('');
@@ -53,9 +61,9 @@ export const BatchManager: React.FC<BatchManagerProps> = ({
       selectedBatchId === 'all' || s.batchId === selectedBatchId;
     const matchesTier =
       tierFilter === 'all' ||
-      (tierFilter === 'tier1' && s.placementReadinessScore >= 80) ||
-      (tierFilter === 'tier2' && s.placementReadinessScore >= 65 && s.placementReadinessScore < 80) ||
-      (tierFilter === 'at_risk' && s.placementReadinessScore < 65);
+      (tierFilter === 'tier1' && s.placementReadinessScore >= tierOneAtOrAbove) ||
+      (tierFilter === 'tier2' && s.placementReadinessScore >= atRiskBelow && s.placementReadinessScore < tierOneAtOrAbove) ||
+      (tierFilter === 'at_risk' && s.placementReadinessScore < atRiskBelow);
     const matchesSearch =
       s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       s.rollNo.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -238,9 +246,9 @@ export const BatchManager: React.FC<BatchManagerProps> = ({
               className="text-xs font-medium px-3 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none"
             >
               <option value="all">All Readiness Tiers</option>
-              <option value="tier1">Tier 1 Ready (≥80%)</option>
-              <option value="tier2">Tier 2 Ready (65-79%)</option>
-              <option value="at_risk">At Risk (&lt;65%)</option>
+              <option value="tier1">Tier 1 Ready (≥{tierOneAtOrAbove}%)</option>
+              <option value="tier2">Tier 2 Ready ({atRiskBelow}-{tierOneAtOrAbove - 1}%)</option>
+              <option value="at_risk">At Risk (&lt;{atRiskBelow}%)</option>
             </select>
           </div>
         </div>
@@ -313,16 +321,16 @@ export const BatchManager: React.FC<BatchManagerProps> = ({
                   <td className="py-3 px-4">
                     <span
                       className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
-                        st.placementReadinessScore >= 80
+                        st.placementReadinessScore >= tierOneAtOrAbove
                           ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
-                          : st.placementReadinessScore >= 65
+                          : st.placementReadinessScore >= atRiskBelow
                           ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300'
                           : 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
                       }`}
                     >
-                      {st.placementReadinessScore >= 80
+                      {st.placementReadinessScore >= tierOneAtOrAbove
                         ? 'Tier 1 Ready'
-                        : st.placementReadinessScore >= 65
+                        : st.placementReadinessScore >= atRiskBelow
                         ? 'Tier 2 Ready'
                         : 'At Risk'}
                     </span>

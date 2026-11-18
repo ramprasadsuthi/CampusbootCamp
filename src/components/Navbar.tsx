@@ -86,6 +86,8 @@ export const Navbar: React.FC<NavbarProps> = ({
               ? 'Admin Mode'
               : currentRole === 'trainer'
               ? 'Trainer Mode'
+              : currentRole === 'panelist'
+              ? 'Panelist Mode'
               : 'Student Mode'}
           </span>
         </div>

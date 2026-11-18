@@ -36,7 +36,98 @@ async function migrate() {
       id VARCHAR(191) PRIMARY KEY,
       name VARCHAR(191) NOT NULL,
       slug VARCHAR(191) NOT NULL UNIQUE,
+      lifecycleStatus ENUM('onboarding', 'active', 'suspended', 'archived') NOT NULL DEFAULT 'active',
+      statusReason VARCHAR(1000) NOT NULL DEFAULT '',
+      lifecycleUpdatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await addColumn('Workspaces', 'lifecycleStatus', "ENUM('onboarding', 'active', 'suspended', 'archived') NOT NULL DEFAULT 'active'");
+  await addColumn('Workspaces', 'statusReason', "VARCHAR(1000) NOT NULL DEFAULT ''");
+  await addColumn('Workspaces', 'lifecycleUpdatedAt', 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformAdminAccounts (
+      id VARCHAR(191) PRIMARY KEY,
+      name VARCHAR(191) NOT NULL,
+      email VARCHAR(191) NOT NULL UNIQUE,
+      passwordHash VARCHAR(255) NOT NULL,
+      totpSecretEncrypted VARCHAR(512) NOT NULL,
+      isActive TINYINT(1) NOT NULL DEFAULT 1,
+      createdByPlatformAdminId VARCHAR(191) NULL,
+      lastLoginAt DATETIME NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_platform_admin_active (isActive, email)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformAdminSessions (
+      id VARCHAR(191) PRIMARY KEY,
+      platformAdminId VARCHAR(191) NOT NULL,
+      tokenHash CHAR(64) NOT NULL UNIQUE,
+      expiresAt DATETIME NOT NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_platform_session_expiry (expiresAt),
+      CONSTRAINT fk_platform_session_admin FOREIGN KEY (platformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformAdminInvitations (
+      id VARCHAR(191) PRIMARY KEY,
+      email VARCHAR(191) NOT NULL,
+      tokenHash CHAR(64) NOT NULL UNIQUE,
+      invitedByPlatformAdminId VARCHAR(191) NOT NULL,
+      expiresAt DATETIME NOT NULL,
+      acceptedAt DATETIME NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_platform_invite_email (email, acceptedAt),
+      CONSTRAINT fk_platform_invitation_admin FOREIGN KEY (invitedByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformAdminMfaResets (
+      id VARCHAR(191) PRIMARY KEY,
+      platformAdminId VARCHAR(191) NOT NULL,
+      tokenHash CHAR(64) NOT NULL UNIQUE,
+      requestedByPlatformAdminId VARCHAR(191) NOT NULL,
+      reason VARCHAR(1000) NOT NULL,
+      expiresAt DATETIME NOT NULL,
+      usedAt DATETIME NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_platform_mfa_reset (platformAdminId, usedAt),
+      CONSTRAINT fk_platform_mfa_reset_target FOREIGN KEY (platformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE CASCADE,
+      CONSTRAINT fk_platform_mfa_reset_requester FOREIGN KEY (requestedByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformWorkspaceAdminInvitations (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      email VARCHAR(191) NOT NULL,
+      tokenHash CHAR(64) NOT NULL UNIQUE,
+      invitedByPlatformAdminId VARCHAR(191) NOT NULL,
+      expiresAt DATETIME NOT NULL,
+      acceptedAt DATETIME NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_platform_workspace_invite (workspaceId, email, acceptedAt),
+      CONSTRAINT fk_platform_workspace_invitation_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_platform_workspace_invitation_admin FOREIGN KEY (invitedByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformAuditEvents (
+      id VARCHAR(191) PRIMARY KEY,
+      platformAdminId VARCHAR(191) NULL,
+      action VARCHAR(100) NOT NULL,
+      targetType VARCHAR(50) NOT NULL,
+      targetId VARCHAR(191) NULL,
+      reason VARCHAR(1000) NOT NULL DEFAULT '',
+      beforeJson JSON NULL,
+      afterJson JSON NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_platform_audit_time (createdAt),
+      KEY idx_platform_audit_target (targetType, targetId, createdAt),
+      CONSTRAINT fk_platform_audit_admin FOREIGN KEY (platformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
   await pool.query(`
@@ -44,7 +135,7 @@ async function migrate() {
       id VARCHAR(191) PRIMARY KEY,
       workspaceId VARCHAR(191) NOT NULL,
       userId VARCHAR(191) NOT NULL,
-      role ENUM('college_admin', 'trainer', 'student') NOT NULL,
+      role ENUM('college_admin', 'trainer', 'student', 'panelist') NOT NULL,
       status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uq_membership_workspace_user (workspaceId, userId),
@@ -196,7 +287,7 @@ async function migrate() {
       id VARCHAR(191) PRIMARY KEY,
       workspaceId VARCHAR(191) NOT NULL,
       email VARCHAR(191) NOT NULL,
-      role ENUM('college_admin', 'trainer', 'student') NOT NULL,
+      role ENUM('college_admin', 'trainer', 'student', 'panelist') NOT NULL,
       tokenHash CHAR(64) NOT NULL UNIQUE,
       invitedByUserId VARCHAR(191) NOT NULL,
       expiresAt DATETIME NOT NULL,
@@ -220,6 +311,159 @@ async function migrate() {
       CONSTRAINT fk_audit_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceSettings (
+      workspaceId VARCHAR(191) PRIMARY KEY,
+      settingsJson MEDIUMTEXT NOT NULL,
+      updatedByUserId VARCHAR(191) NULL,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT fk_workspace_settings_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_workspace_settings_updater FOREIGN KEY (updatedByUserId) REFERENCES Users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceSubscriptions (
+      workspaceId VARCHAR(191) PRIMARY KEY,
+      planId ENUM('pilot', 'campus', 'campus_plus') NOT NULL DEFAULT 'pilot',
+      status ENUM('not_configured', 'trialing', 'active', 'past_due', 'canceled', 'suspended') NOT NULL DEFAULT 'not_configured',
+      billingInterval ENUM('monthly', 'annual') NOT NULL DEFAULT 'monthly',
+      currency CHAR(3) NOT NULL DEFAULT 'INR',
+      currentPeriodStart DATETIME NULL,
+      currentPeriodEnd DATETIME NULL,
+      trialEndsAt DATETIME NULL,
+      cancelAtPeriodEnd TINYINT(1) NOT NULL DEFAULT 0,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT fk_workspace_subscription_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceAiUsage (
+      workspaceId VARCHAR(191) NOT NULL,
+      periodStart DATE NOT NULL,
+      creditsUsed INT UNSIGNED NOT NULL DEFAULT 0,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (workspaceId, periodStart),
+      CONSTRAINT fk_workspace_ai_usage_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceInterviewPanelists (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      name VARCHAR(191) NOT NULL,
+      email VARCHAR(191) NULL,
+      userId VARCHAR(191) NULL,
+      designation VARCHAR(191) NOT NULL DEFAULT '',
+      specialties VARCHAR(500) NOT NULL DEFAULT '',
+      isActive TINYINT(1) NOT NULL DEFAULT 1,
+      createdByUserId VARCHAR(191) NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_panelist_workspace_name (workspaceId, name),
+      UNIQUE KEY uq_panelist_workspace_user (workspaceId, userId),
+      KEY idx_panelist_workspace_active (workspaceId, isActive, name),
+      CONSTRAINT fk_panelist_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_panelist_creator FOREIGN KEY (createdByUserId) REFERENCES Users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceUserNotifications (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      userId VARCHAR(191) NOT NULL,
+      notificationType VARCHAR(50) NOT NULL,
+      title VARCHAR(191) NOT NULL,
+      description TEXT NOT NULL,
+      relatedEntityId VARCHAR(191) NULL,
+      readAt DATETIME NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_user_notification_inbox (workspaceId, userId, readAt, createdAt),
+      CONSTRAINT fk_user_notification_membership FOREIGN KEY (workspaceId, userId) REFERENCES WorkspaceMemberships(workspaceId, userId) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceInterviewSchedules (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      studentUserId VARCHAR(191) NOT NULL,
+      interviewType ENUM('tech', 'hr') NOT NULL,
+      scheduledAt DATETIME NOT NULL,
+      durationMinutes SMALLINT UNSIGNED NOT NULL DEFAULT 30,
+      panelist VARCHAR(191) NOT NULL,
+      panelistId VARCHAR(191) NULL,
+      location VARCHAR(500) NOT NULL DEFAULT '',
+      notes TEXT NULL,
+      status ENUM('scheduled', 'completed', 'cancelled') NOT NULL DEFAULT 'scheduled',
+      createdByUserId VARCHAR(191) NOT NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_interview_schedule_workspace_time (workspaceId, status, scheduledAt),
+      KEY idx_interview_schedule_student (workspaceId, studentUserId, scheduledAt),
+      CONSTRAINT fk_interview_schedule_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_interview_schedule_student FOREIGN KEY (workspaceId, studentUserId) REFERENCES WorkspaceMemberships(workspaceId, userId) ON DELETE CASCADE,
+      CONSTRAINT fk_interview_schedule_creator FOREIGN KEY (createdByUserId) REFERENCES Users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await addColumn('WorkspaceInterviewSchedules', 'panelistId', 'VARCHAR(191) NULL');
+  await addColumn('WorkspaceInterviewPanelists', 'userId', 'VARCHAR(191) NULL');
+  await addColumn('InterviewRecords', 'scheduleId', 'VARCHAR(191) NULL');
+  await pool.query("ALTER TABLE WorkspaceInterviewSchedules MODIFY COLUMN status ENUM('scheduled', 'completed', 'cancelled') NOT NULL DEFAULT 'scheduled'");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceInterviewFollowUps (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      scheduleId VARCHAR(191) NOT NULL,
+      outcome ENUM('needs_another_interview', 'referred_for_placement', 'offer_confirmed', 'no_further_action') NOT NULL,
+      notes TEXT NULL,
+      studentNotes TEXT NULL,
+      updatedByUserId VARCHAR(191) NOT NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_interview_followup_schedule (workspaceId, scheduleId),
+      KEY idx_interview_followup_outcome (workspaceId, outcome),
+      CONSTRAINT fk_interview_followup_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_interview_followup_schedule FOREIGN KEY (scheduleId) REFERENCES WorkspaceInterviewSchedules(id) ON DELETE CASCADE,
+      CONSTRAINT fk_interview_followup_editor FOREIGN KEY (updatedByUserId) REFERENCES Users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await addColumn('WorkspaceInterviewFollowUps', 'studentNotes', 'TEXT NULL');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS WorkspaceInterviewFollowUpHistory (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      scheduleId VARCHAR(191) NOT NULL,
+      outcome ENUM('needs_another_interview', 'referred_for_placement', 'offer_confirmed', 'no_further_action') NOT NULL,
+      notes TEXT NULL,
+      studentNotes TEXT NULL,
+      updatedByUserId VARCHAR(191) NOT NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_interview_followup_history (workspaceId, scheduleId, createdAt),
+      CONSTRAINT fk_interview_followup_history_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_interview_followup_history_schedule FOREIGN KEY (scheduleId) REFERENCES WorkspaceInterviewSchedules(id) ON DELETE CASCADE,
+      CONSTRAINT fk_interview_followup_history_editor FOREIGN KEY (updatedByUserId) REFERENCES Users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    INSERT INTO WorkspaceInterviewFollowUpHistory (id, workspaceId, scheduleId, outcome, notes, studentNotes, updatedByUserId, createdAt)
+    SELECT UUID(), f.workspaceId, f.scheduleId, f.outcome, f.notes, f.studentNotes, f.updatedByUserId, f.updatedAt
+    FROM WorkspaceInterviewFollowUps f
+    WHERE NOT EXISTS (
+      SELECT 1 FROM WorkspaceInterviewFollowUpHistory h
+      WHERE h.workspaceId = f.workspaceId AND h.scheduleId = f.scheduleId
+    )
+  `);
+  await pool.query("ALTER TABLE WorkspaceMemberships MODIFY COLUMN role ENUM('college_admin', 'trainer', 'student', 'panelist') NOT NULL");
+  await pool.query("ALTER TABLE WorkspaceInvitations MODIFY COLUMN role ENUM('college_admin', 'trainer', 'student', 'panelist') NOT NULL");
+  const [panelistAccountIndex]: any = await pool.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
+     AND TABLE_NAME = 'WorkspaceInterviewPanelists' AND INDEX_NAME = 'uq_panelist_workspace_user' LIMIT 1`,
+  );
+  if (!panelistAccountIndex.length) await pool.query('ALTER TABLE WorkspaceInterviewPanelists ADD UNIQUE KEY uq_panelist_workspace_user (workspaceId, userId)');
+  const [scheduleEvaluationIndex]: any = await pool.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
+     AND TABLE_NAME = 'InterviewRecords' AND INDEX_NAME = 'uq_interview_record_schedule' LIMIT 1`,
+  );
+  if (!scheduleEvaluationIndex.length) await pool.query('ALTER TABLE InterviewRecords ADD UNIQUE KEY uq_interview_record_schedule (workspaceId, scheduleId)');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS WorkspacePasswordResets (
       id VARCHAR(191) PRIMARY KEY,
@@ -308,6 +552,21 @@ async function migrate() {
 
   const [allWorkspaces]: any = await pool.query('SELECT id FROM Workspaces');
   for (const workspace of allWorkspaces) {
+    await pool.execute('INSERT IGNORE INTO WorkspaceSubscriptions (workspaceId) VALUES (?)', [workspace.id]);
+    await pool.execute(
+      `INSERT IGNORE INTO WorkspaceInterviewPanelists (id, workspaceId, name)
+       SELECT UUID(), workspaceId, MAX(TRIM(panelist)) FROM WorkspaceInterviewSchedules
+       WHERE workspaceId = ? AND TRIM(panelist) <> ''
+       GROUP BY workspaceId, LOWER(TRIM(panelist))`,
+      [workspace.id],
+    );
+    await pool.execute(
+      `UPDATE WorkspaceInterviewSchedules s
+       JOIN WorkspaceInterviewPanelists p ON p.workspaceId = s.workspaceId
+         AND LOWER(TRIM(p.name)) = LOWER(TRIM(s.panelist))
+       SET s.panelistId = p.id WHERE s.workspaceId = ? AND s.panelistId IS NULL`,
+      [workspace.id],
+    );
     const [workspaceAssessments]: any = await pool.execute('SELECT id FROM Assessments WHERE workspaceId = ?', [workspace.id]);
     const existingAssessmentIds = new Set(workspaceAssessments.map((assessment: { id: string }) => assessment.id));
     for (const assessment of ASSESSMENTS_CATALOG) {

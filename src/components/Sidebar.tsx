@@ -16,6 +16,7 @@ import {
   Sparkles,
   ChevronRight,
   Building2,
+  CreditCard,
 } from 'lucide-react';
 import { UserRole } from '../types';
 
@@ -47,6 +48,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           { id: 'analytics', label: 'Institutional Analytics', icon: BarChart3 },
           { id: 'reports', label: 'Reports & Export', icon: FileText },
           { id: 'settings', label: 'System Settings', icon: Sliders },
+          { id: 'subscription', label: 'Subscription & Usage', icon: CreditCard },
           { id: 'workspace', label: 'Workspace Members', icon: Building2 },
         ];
       case 'trainer':
@@ -59,6 +61,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           { id: 'curriculum', label: '40-Day Roadmap', icon: CalendarDays },
           { id: 'analytics', label: 'Cohort Heatmaps', icon: BarChart3 },
           { id: 'leaderboard', label: 'Batch Leaderboard', icon: Trophy },
+        ];
+      case 'panelist':
+        return [
+          { id: 'panelist_interviews', label: 'Assigned Interviews', icon: Briefcase },
         ];
       case 'student':
       default:

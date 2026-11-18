@@ -106,7 +106,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
           {mode === 'login' && registrationEnabled && <button type="button" onClick={() => { setWorkspaceName(''); setMode('register'); }} className="w-full py-1 text-xs font-semibold text-indigo-700 hover:text-indigo-900">Create a college workspace</button>}
           {(mode === 'bootstrap' || mode === 'register') && <button type="button" onClick={() => setMode('login')} className="w-full py-1 text-xs font-semibold text-slate-500 hover:text-slate-800">Back to sign in</button>}
         </form>
-        <div className="border-t border-slate-100 px-8 py-4 text-center text-[11px] text-slate-400">Your college workspace keeps its users and learning data separated.</div>
+        <div className="border-t border-slate-100 px-8 py-4 text-center text-[11px] text-slate-400">Your college workspace keeps its users and learning data separated.<a href="/platform-admin" className="mt-2 block font-semibold text-indigo-600 hover:text-indigo-800">TalentEdge platform administration</a></div>
       </section>
     </main>
   );

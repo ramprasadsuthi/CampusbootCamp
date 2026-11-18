@@ -20,9 +20,25 @@ Each college has an isolated workspace (tenant). A user may have a role in a col
 
 Permissions are scoped by workspace and role. Subscription entitlements are a separate concern: a role determines what a user may do, while the plan determines which capabilities and capacity the college has purchased.
 
+### Permission boundary
+
+The permission registry in `src/types/subscriptions.ts` is the canonical planning matrix. These are role capabilities, not subscription features. Server routes must enforce them; hiding a menu item is not authorization. College roles are `student`, `trainer`, and `college_admin`. `platform_admin` is a separate platform-level role and must never be inferred from college membership.
+
+| Capability | Student | Trainer | College admin | Platform admin |
+| --- | --- | --- | --- | --- |
+| Own profile, assigned learning, own assessments and results | Own records | — | Own profile | Support access only, audited |
+| Assigned batches, students, content and evaluation | — | Assigned batches only | Workspace-wide | Support access only, audited |
+| Invite/deactivate members; manage roles | — | — | Workspace-wide | Cross-workspace support |
+| Create batches/enroll students; manage curriculum and assessments | — | Assigned content only, per policy | Workspace-wide | Shared content/catalog only |
+| Schedule interviews / record evaluation | View own schedule and results | Evaluate assigned students | Schedule workspace interviews | Support access only, audited |
+| Analytics and exports | Own report | Assigned batches | Workspace-wide | Operational / billing views; student data only for audited support |
+| Subscription and billing | — | — | Read/manage own college | Manage all workspaces and plan catalog |
+
+The role registry is a policy definition for upcoming enforcement work. Existing route checks still need to be migrated to these capabilities before treating this matrix as an implemented security guarantee.
+
 ## Initial subscription tiers
 
-All tiers are college subscriptions. A trial is a subscription state or offer, not a separate feature tier. Exact prices and numeric limits remain to be set after pilot discovery.
+All tiers are college subscriptions. A trial is a subscription state or offer, not a separate feature tier. Exact prices remain to be set after pilot discovery; proposed numeric capacity defaults are documented below.
 
 | Tier | Intended use | Included capabilities |
 | --- | --- | --- |
@@ -32,15 +48,18 @@ All tiers are college subscriptions. A trial is a subscription state or offer, n
 
 The plan catalog should support monthly and annual billing, a trial period, upgrades and downgrades, cancellation at period end, invoice history, and a past-due/suspended state. The payment provider and exact commercial terms are Stage 2/implementation decisions; prices are not yet approved.
 
-## Capacity and usage dimensions
+## Proposed capacity and usage baseline
 
-The primary plan limit is **active students**. Each plan also has independently configurable limits for:
+The primary plan limit is **active students**. The following are proposed starting values for pilot planning, not approved commercial commitments. They are represented as data in `src/types/subscriptions.ts` so later adjustments do not require rewriting screens or route logic.
 
-- Trainer seats
-- Active batches
-- AI requests or credits per billing period
+| Limit per college workspace | Pilot | Campus | Campus Plus |
+| --- | ---: | ---: | ---: |
+| Active students | 100 | 500 | 2,000 |
+| Trainer seats | 5 | 25 | 100 |
+| Active batches | 3 | 20 | 100 |
+| AI credits per billing period | 500 | 5,000 | 25,000 |
 
-The initial plan catalog should store these limits as configuration, not as checks scattered through screens or API routes. Exact values are intentionally marked **TBD** pending pilot feedback. A student should count as active based on an explicit enrollment/account state and the subscription period, not simply because a profile row exists.
+The initial plan catalog stores these limits as configuration, not as checks scattered through screens or API routes. Validate the proposed quantities with pilot colleges before commercial launch. A student counts as active only when their workspace membership and enrollment are active; a profile row by itself is not sufficient. Trainer seats count active trainer memberships. Pending invitations do not consume seats, but acceptance is checked against current capacity. Active batches exclude archived batches. AI credits need an agreed metering definition before enforcement (for example, one successful AI request or a weighted token unit).
 
 ## Base release requirements
 
@@ -90,14 +109,14 @@ These should fit the tenant, role, and entitlement model, but are not required f
 6. Curriculum and assessments are versioned so historical student attempts retain their original meaning.
 7. Readiness probabilities are advisory product estimates, not promises of placement outcomes.
 
-## Current codebase gap
+## Current implementation boundary
 
-The current app is a demo/prototype with role switching, sample data, and selected MySQL-backed routes. It does not yet have authenticated accounts, college tenant isolation, persisted subscription/billing records, usage enforcement, or a production code-execution service. This document and the subscription types are the Stage 1 scope foundation; subsequent stages must implement those capabilities before public paid launch.
+The app now has authenticated workspace accounts, tenant-scoped membership, and selected MySQL-backed workflows. `src/types/subscriptions.ts` defines proposed tier capacities and a role permission registry. Workspace subscription status and usage are visible to college admins, and server-side quotas currently cover student/trainer invitations and activations, active batch creation/unarchiving, and provider-generated AI requests. These limits remain planning defaults; billing, invoice history, plan administration, and a separate platform-admin experience are not implemented. Role permissions are not yet centrally capability-enforced across all routes. The code-run endpoint remains a simulator rather than a production judging service.
 
 ## Decisions still open
 
 - Exact prices in INR and any annual discount
-- Numeric capacity and AI allowances per tier
+- Validation and approval of proposed numeric capacity and AI allowances per tier
 - Trial duration and whether Pilot becomes a paid tier or remains a time-limited evaluation offer
 - Payment provider and supported payment methods
 - What access remains available while a subscription is past due or suspended

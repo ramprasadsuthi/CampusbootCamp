@@ -170,6 +170,7 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
         setAiPlan(res.recommendation);
       } catch (error) {
         console.error(error);
+        setAiPlan(error instanceof Error ? error.message : 'AI recommendations are unavailable for this workspace right now.');
       } finally {
         setLoadingAi(false);
       }

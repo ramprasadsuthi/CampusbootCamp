@@ -34,6 +34,20 @@ export interface CodeRunResponse {
   }[];
 }
 
+class PlanLimitReachedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlanLimitReachedError';
+  }
+}
+
+async function throwForAiResponseError(response: Response) {
+  if (response.ok) return;
+  const data = await response.json().catch(() => ({}));
+  if (data.code === 'PLAN_LIMIT_REACHED') throw new PlanLimitReachedError(data.error || 'This workspace has reached its plan limit.');
+  throw new Error(data.error || `HTTP ${response.status}`);
+}
+
 export async function fetchAiRecommendations(params: {
   studentName: string;
   scores: Record<string, number>;
@@ -46,9 +60,10 @@ export async function fetchAiRecommendations(params: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await throwForAiResponseError(res);
     return await res.json();
   } catch (err) {
+    if (err instanceof PlanLimitReachedError) throw err;
     console.warn('Fallback to local recommendation:', err);
     return {
       recommendation: `### 🎯 High-Impact Placement Action Plan for ${params.studentName}
@@ -68,9 +83,10 @@ export async function fetchAiReadinessPrediction(student: any, overallScore: num
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ student, overallScore }),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await throwForAiResponseError(res);
     return await res.json();
   } catch (err) {
+    if (err instanceof PlanLimitReachedError) throw err;
     console.warn('Fallback to local readiness prediction:', err);
     const score = overallScore || 85;
     return {
@@ -97,13 +113,14 @@ export async function predictCompanyReadiness(params: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await throwForAiResponseError(res);
     const data = await res.json();
     return {
       probability: data.probabilityTCSDigital || 92,
       advice: data.summary || `Strong algorithmic foundation fits ${params.targetCompany} criteria. Keep revising Day 31-36 mock questions.`,
     };
   } catch (err) {
+    if (err instanceof PlanLimitReachedError) throw err;
     const avg = Math.round(
       Object.values(params.scores).reduce((a, b) => a + b, 0) /
         Object.values(params.scores).length
@@ -127,9 +144,10 @@ export async function fetchAiTrainerSummary(params: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await throwForAiResponseError(res);
     return await res.json();
   } catch (err) {
+    if (err instanceof PlanLimitReachedError) throw err;
     return {
       summary: `### 📋 Executive Intervention Strategy for ${params.batchName}
 1. **Targeted Micro-Workshops**: 30 minutes daily before the coding slot dedicated strictly to **${params.lowScoringTopics.slice(0, 2).join(' & ')}**.
@@ -274,6 +292,7 @@ export async function updateStudentRemarks(studentId: string, params: { remark: 
   return await res.json();
 }
 import { Assessment, CurriculumLearningCheck, CurriculumMaterial, CurriculumMaterialType, CurriculumTextFormat } from '../types';
+import { InterviewReportResult, PlacementOutcomeHistoryRow, PlacementOutcomeReport, ReportActivityType, WorkspaceActivityResult } from '../types/reports';
 
 async function apiRequest<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -283,5 +302,39 @@ async function apiRequest<T>(url: string, options?: RequestInit): Promise<T> {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data as T;
+}
+
+export async function fetchWorkspaceActivityReport(params: {
+  activityType: Exclude<ReportActivityType, 'placement_readiness'>;
+  batchId: string;
+  dateFrom: string;
+  dateTo: string;
+  tier: string;
+  query: string;
+}): Promise<WorkspaceActivityResult> {
+  const search = new URLSearchParams({ ...params, batchId: params.batchId === 'all' ? '' : params.batchId });
+  return await apiRequest<WorkspaceActivityResult>(`/api/reports/activity?${search.toString()}`);
+}
+
+export async function fetchInterviewAnalytics(params: {
+  batchId: string;
+  dateFrom: string;
+  dateTo: string;
+  interviewType: string;
+  panelistId: string;
+  lifecycle: string;
+  followUp: string;
+}): Promise<InterviewReportResult> {
+  const search = new URLSearchParams({ ...params, batchId: params.batchId === 'all' ? '' : params.batchId, panelistId: params.panelistId === 'all' ? '' : params.panelistId });
+  return apiRequest<InterviewReportResult>(`/api/reports/interviews?${search.toString()}`);
+}
+
+export async function fetchPlacementOutcomeReport(params: { batchId: string; outcome: string; dateFrom: string; dateTo: string }): Promise<PlacementOutcomeReport> {
+  const search = new URLSearchParams({ ...params, batchId: params.batchId === 'all' ? '' : params.batchId });
+  return apiRequest<PlacementOutcomeReport>(`/api/reports/placement-outcomes?${search.toString()}`);
+}
+
+export async function fetchPlacementOutcomeHistory(scheduleId: string): Promise<PlacementOutcomeHistoryRow[]> {
+  return apiRequest<PlacementOutcomeHistoryRow[]>(`/api/interview-follow-ups/${encodeURIComponent(scheduleId)}/history`);
 }
 

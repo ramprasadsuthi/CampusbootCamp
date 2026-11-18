@@ -1,4 +1,5 @@
-import { AuthenticatedSession, WorkspaceAuditEvent, WorkspaceMember } from '../types/auth';
+import { AuthenticatedSession, StudentInterviewFollowUp, WorkspaceAuditEvent, WorkspaceInterviewPanelist, WorkspaceInterviewSchedule, WorkspaceMember, WorkspaceSettings } from '../types/auth';
+import { WorkspaceSubscriptionOverview } from '../types/subscriptions';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -75,11 +76,62 @@ export function signOut() {
 export const getWorkspaceMembers = () => request<WorkspaceMember[]>('/api/workspace/members');
 export const getWorkspaceTrainers = () => request<Array<{ id: string; name: string; email: string }>>('/api/workspace/trainers');
 export const getWorkspaceAudit = () => request<WorkspaceAuditEvent[]>('/api/workspace/audit');
+export const getWorkspaceSettings = () => request<{ settings: WorkspaceSettings }>('/api/workspace/settings');
+export const getWorkspaceSubscriptionOverview = () => request<WorkspaceSubscriptionOverview>('/api/workspace/subscription');
+export const saveWorkspaceSettings = (settings: WorkspaceSettings) => request<{ settings: WorkspaceSettings }>('/api/workspace/settings', {
+  method: 'PUT',
+  body: JSON.stringify(settings),
+});
+export const getInterviewSchedules = () => request<WorkspaceInterviewSchedule[]>('/api/interview-schedules');
+export const getMyInterviewSchedules = () => request<WorkspaceInterviewSchedule[]>('/api/interview-schedules/mine');
+export const getMyInterviewFollowUps = () => request<StudentInterviewFollowUp[]>('/api/interview-follow-ups/mine');
+export interface AssignedPanelistInterview extends Omit<WorkspaceInterviewSchedule, 'batchName'> { hasEvaluation: boolean; }
+export interface PanelistInterviewEvaluation { ratings: Record<string, number>; remarks: string; recommendation: 'hire' | 'borderline' | 'remedial'; }
+export interface InterviewEvaluationDetail {
+  id: string; studentId: string; studentName: string; rollNo: string; interviewType: 'tech' | 'hr';
+  panelist: string; scheduledAt: string; evaluationDate: string; ratings: Record<string, number>;
+  remarks: string; recommendation: string; score: number;
+}
+export const getInterviewEvaluationDetail = (scheduleId: string) => request<InterviewEvaluationDetail>(`/api/interview-schedules/${encodeURIComponent(scheduleId)}/evaluation`);
+export const getAssignedPanelistInterviews = () => request<AssignedPanelistInterview[]>('/api/interview-schedules/assigned');
+export const submitPanelistInterviewEvaluation = (scheduleId: string, evaluation: PanelistInterviewEvaluation) => request<{ success: boolean; score: number }>(`/api/interview-schedules/${encodeURIComponent(scheduleId)}/evaluation`, { method: 'POST', body: JSON.stringify(evaluation) });
+export const markWorkspaceNotificationRead = (id: string) => request<{ success: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: 'PATCH' });
+export const getInterviewPanelists = () => request<WorkspaceInterviewPanelist[]>('/api/interview-panelists');
+export function saveInterviewPanelist(params: Partial<Pick<WorkspaceInterviewPanelist, 'id'>> & Omit<WorkspaceInterviewPanelist, 'id' | 'isActive'>) {
+  const { id, ...body } = params;
+  return request<{ success: boolean; id: string }>(id ? `/api/interview-panelists/${encodeURIComponent(id)}` : '/api/interview-panelists', {
+    method: id ? 'PATCH' : 'POST', body: JSON.stringify(body),
+  });
+}
+export function setInterviewPanelistStatus(id: string, isActive: boolean) {
+  return request<{ success: boolean }>(`/api/interview-panelists/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ isActive }) });
+}
+export function createInterviewSchedule(params: Omit<WorkspaceInterviewSchedule, 'id' | 'studentName' | 'rollNo' | 'batchName' | 'panelist'>) {
+  return request<{ success: boolean; id: string }>('/api/interview-schedules', { method: 'POST', body: JSON.stringify(params) });
+}
+export function updateInterviewSchedule(id: string, params: Omit<WorkspaceInterviewSchedule, 'id' | 'studentName' | 'rollNo' | 'batchName' | 'panelist'>) {
+  return request<{ success: boolean }>(`/api/interview-schedules/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(params) });
+}
+export function cancelInterviewSchedule(id: string) {
+  return request<{ success: boolean }>(`/api/interview-schedules/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ status: 'cancelled' }) });
+}
+
+export type InterviewFollowUpOutcome = 'needs_another_interview' | 'referred_for_placement' | 'offer_confirmed' | 'no_further_action';
+export function saveInterviewFollowUp(id: string, params: { outcome: InterviewFollowUpOutcome; notes: string; studentNotes: string }) {
+  return request<{ success: boolean; outcome: InterviewFollowUpOutcome; notes: string; studentNotes: string }>(`/api/interview-schedules/${encodeURIComponent(id)}/follow-up`, { method: 'PUT', body: JSON.stringify(params) });
+}
 
 export function setWorkspaceMemberStatus(userId: string, status: WorkspaceMember['status']) {
   return request<{ success: boolean }>(`/api/workspace/members/${encodeURIComponent(userId)}/status`, {
     method: 'PATCH',
     body: JSON.stringify({ status }),
+  });
+}
+
+export function updateWorkspaceMember(userId: string, params: { role?: WorkspaceMember['role']; batchId?: string | null }) {
+  return request<{ success: boolean }>(`/api/workspace/members/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(params),
   });
 }
 
