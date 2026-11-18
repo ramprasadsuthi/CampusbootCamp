@@ -7,12 +7,17 @@ The original college workflows use tenant-scoped workspace sessions. A separate 
 - Platform accounts use their own account table, MFA secret, session cookie, and server authorization guard. They do not need a college membership.
 - TOTP MFA is mandatory. Authenticator secrets are encrypted with `PLATFORM_MFA_ENCRYPTION_KEY`; the initial account is created through `npm run platform-admin:create`, and additional admins are invited by an existing platform admin.
 - The console shows a workspace overview and directory, supports onboarding workspace creation and first college-admin invitations, shows workspace-level details, and supports reversible lifecycle changes with a reason and audit record.
+- Workspace details show first administrator invitation state and an onboarding checklist. A workspace cannot be set to Active until at least one college-admin membership and account are both active; the API enforces this in addition to the disabled UI action.
+- Workspace details list college-admin invitations with pending, accepted, expired, and revoked states. Platform admins can resend or revoke pending links; creating/resending a link invalidates any previous pending link for that email, and all invite changes are audited.
+- The platform-wide audit log is searchable by actor, workspace, action, reason, and identifier, and supports target-type/date filters with pagination.
+- The platform overview flags onboarding older than seven days, current college-admin invites that have expired or expire within 24 hours, and student/trainer/batch capacity at 80% or more of the assigned planning limit. Alerts link to workspace details; 90% and 100% capacity are raised to higher severity.
+- The Shared content library stores versioned releases of common Day 1–40 video/PDF/text materials and built-in sample assessment templates. Platform admins edit drafts, publish with a reason, then explicitly apply a published release to selected onboarding or active colleges with a reason. Applying adds or updates untouched shared items while preserving college-customized items, student learning progress, and assessment submissions; removed items are not deleted from colleges.
 - College sign-in is blocked for suspended or archived workspaces, and their existing sessions are revoked when the state changes.
 - `src/types/subscriptions.ts` and `PRODUCT_SCOPE.md` still define the broader permission and product policy groundwork.
 - `WorkspaceSubscriptions` stores each college's plan, status, interval, and term dates. College admins can view their own subscription and usage.
 - The plan catalog (`pilot`, `campus`, `campus_plus`) and proposed limits are currently defined in TypeScript. Prices are unset, and billing/payment processing is not implemented.
 
-Plan catalog editing, subscription changes, payment/invoice operations, shared content management, and support access to student records remain unimplemented. The console intentionally shows operational counts and college-admin contacts rather than student records.
+Plan catalog editing, subscription changes, payment/invoice operations, and support access to student records remain unimplemented. The console intentionally shows operational counts and college-admin contacts rather than student records.
 
 ## Design principles
 
@@ -109,13 +114,12 @@ The current `WorkspaceSubscriptions.planId` enum will need a careful migration t
 ### Stage D — Plans, shared content, and support operations
 
 1. Add plan catalog editing only after pricing and entitlement policy are approved.
-2. Add shared content publishing/versioning if centrally managed sample material is required.
-3. Add controlled support access, with consent/approval policy, expiry, indicator, and audit.
-4. Add operational alerts and billing-provider integration after provider selection.
+2. Add controlled support access, with consent/approval policy, expiry, indicator, and audit.
+3. Add billing-provider integration after provider selection.
 
 ## First implementation slice
 
-**Stage A and the initial Stage B slice are implemented**: dedicated platform-admin sign-in, mandatory MFA, platform-only authorization, audit logging, workspace overview/directory, onboarding provisioning, and a workspace detail page. Do not expose student records in this foundation. The remaining delivery sequence is the plan catalog, subscription history and changes, shared content, and audited support tooling.
+**Stages A and the initial Stage B slice are implemented**, along with shared content versioning and publishing: dedicated platform-admin sign-in, mandatory MFA, platform-only authorization, audit logging, workspace overview/directory, onboarding provisioning, a workspace detail page, and the shared content library. Do not expose student records in this foundation. The remaining delivery sequence is commercial plan/subscription history and changes, and audited support tooling.
 
 ## Decisions needed before subscription controls
 

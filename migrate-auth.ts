@@ -114,6 +114,7 @@ async function migrate() {
       CONSTRAINT fk_platform_workspace_invitation_admin FOREIGN KEY (invitedByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+  await addColumn('PlatformWorkspaceAdminInvitations', 'revokedAt', 'DATETIME NULL');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS PlatformAuditEvents (
       id VARCHAR(191) PRIMARY KEY,
@@ -128,6 +129,37 @@ async function migrate() {
       KEY idx_platform_audit_time (createdAt),
       KEY idx_platform_audit_target (targetType, targetId, createdAt),
       CONSTRAINT fk_platform_audit_admin FOREIGN KEY (platformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformSharedContentVersions (
+      id VARCHAR(191) PRIMARY KEY,
+      versionNumber INT UNSIGNED NOT NULL UNIQUE,
+      title VARCHAR(191) NOT NULL,
+      status ENUM('draft', 'published') NOT NULL DEFAULT 'draft',
+      contentJson MEDIUMTEXT NOT NULL,
+      createdByPlatformAdminId VARCHAR(191) NULL,
+      publishedByPlatformAdminId VARCHAR(191) NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      publishedAt DATETIME NULL,
+      KEY idx_shared_content_status (status, versionNumber),
+      CONSTRAINT fk_shared_content_creator FOREIGN KEY (createdByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE SET NULL,
+      CONSTRAINT fk_shared_content_publisher FOREIGN KEY (publishedByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformSharedContentApplications (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      versionId VARCHAR(191) NOT NULL,
+      appliedByPlatformAdminId VARCHAR(191) NOT NULL,
+      resultJson JSON NULL,
+      appliedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_shared_content_workspace_version (workspaceId, versionId),
+      KEY idx_shared_content_apply_time (appliedAt),
+      CONSTRAINT fk_shared_content_apply_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_shared_content_apply_version FOREIGN KEY (versionId) REFERENCES PlatformSharedContentVersions(id) ON DELETE CASCADE,
+      CONSTRAINT fk_shared_content_apply_admin FOREIGN KEY (appliedByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE RESTRICT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
   await pool.query(`
@@ -491,11 +523,33 @@ async function migrate() {
   await addColumn('Notifications', 'createdAt', 'DATETIME NULL DEFAULT CURRENT_TIMESTAMP');
   await addColumn('WorkspaceInvitations', 'batchId', 'VARCHAR(191) NULL');
   await addColumn('WorkspaceCurriculumMaterials', 'contentFormat', "ENUM('markdown', 'html') NOT NULL DEFAULT 'markdown'");
+  await addColumn('WorkspaceCurriculumMaterials', 'sourceContentId', 'VARCHAR(191) NULL');
+  await addColumn('WorkspaceCurriculumMaterials', 'sourceVersionId', 'VARCHAR(191) NULL');
+  await addColumn('WorkspaceCurriculumMaterials', 'isCustomized', 'TINYINT(1) NOT NULL DEFAULT 0');
   await addColumn('Assessments', 'workspaceId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'createdByUserId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'batchId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'isArchived', 'TINYINT(1) NOT NULL DEFAULT 0');
   await addColumn('Assessments', 'updatedAt', 'DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+  await addColumn('Assessments', 'sourceContentId', 'VARCHAR(191) NULL');
+  await addColumn('Assessments', 'sourceVersionId', 'VARCHAR(191) NULL');
+  await addColumn('Assessments', 'isCustomized', 'TINYINT(1) NOT NULL DEFAULT 0');
+  for (const [table, indexName] of [['WorkspaceCurriculumMaterials', 'uq_curriculum_shared_source'], ['Assessments', 'uq_assessment_shared_source']] as const) {
+    const [indexes]: any = await pool.query(`SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`, [table, indexName]);
+    if (!indexes.length) await pool.query(`ALTER TABLE \`${table}\` ADD UNIQUE KEY \`${indexName}\` (workspaceId, sourceContentId)`);
+  }
+
+  const initialSharedContent = JSON.stringify({
+    schemaVersion: 1,
+    materials: [],
+    assessmentTemplates: ASSESSMENTS_CATALOG,
+    enabledAssessmentIds: ASSESSMENTS_CATALOG.map((assessment) => assessment.id),
+  });
+  await pool.execute(
+    `INSERT IGNORE INTO PlatformSharedContentVersions (id, versionNumber, title, status, contentJson)
+     VALUES ('platform-content-v1', 1, 'Initial shared sample assessment library', 'draft', ?)`,
+    [initialSharedContent],
+  );
   await addColumn('Submissions', 'workspaceId', 'VARCHAR(191) NULL');
   await addColumn('InterviewRecords', 'workspaceId', 'VARCHAR(191) NULL');
   await addColumn('InterviewRecords', 'createdByUserId', 'VARCHAR(191) NULL');
@@ -567,6 +621,14 @@ async function migrate() {
        SET s.panelistId = p.id WHERE s.workspaceId = ? AND s.panelistId IS NULL`,
       [workspace.id],
     );
+    for (const assessment of ASSESSMENTS_CATALOG) {
+      const canonicalAssessmentId = `${workspace.id}:${assessment.id}`;
+      await pool.execute(
+        `UPDATE Assessments SET sourceContentId = ?, isCustomized = 1
+         WHERE id = ? AND workspaceId = ? AND sourceContentId IS NULL`,
+        [assessment.id, canonicalAssessmentId, workspace.id],
+      );
+    }
     const [workspaceAssessments]: any = await pool.execute('SELECT id FROM Assessments WHERE workspaceId = ?', [workspace.id]);
     const existingAssessmentIds = new Set(workspaceAssessments.map((assessment: { id: string }) => assessment.id));
     for (const assessment of ASSESSMENTS_CATALOG) {
@@ -574,8 +636,8 @@ async function migrate() {
       if (existingAssessmentIds.has(assessmentId)) continue;
       await pool.execute(
         `INSERT IGNORE INTO Assessments
-         (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, sourceContentId, isCustomized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
         [
           assessmentId,
           workspace.id,
@@ -590,6 +652,7 @@ async function migrate() {
           assessment.scheduledDate,
           JSON.stringify(assessment.sections),
           JSON.stringify(assessment.targetCompanies),
+          assessment.id,
         ],
       );
     }

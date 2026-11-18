@@ -71,12 +71,12 @@ async function ensureWorkspaceAssessments(db: any, workspaceId: string, createdB
     if (existingIds.has(id)) continue;
     await db.execute(
       `INSERT IGNORE INTO Assessments
-       (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId, sourceContentId, isCustomized)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       [id, workspaceId, assessment.dayNumber, assessment.title, assessment.type,
         assessment.durationMinutes, assessment.totalMarks, JSON.stringify(assessment.coverage), assessment.purpose,
         assessment.status, assessment.scheduledDate, JSON.stringify(assessment.sections),
-        JSON.stringify(assessment.targetCompanies), createdByUserId],
+        JSON.stringify(assessment.targetCompanies), createdByUserId, assessment.id],
     );
   }
 }
@@ -770,7 +770,7 @@ app.post('/api/platform/auth/invitations/accept', async (req, res) => {
       [id, name.trim(), invitation.email, await hashPassword(password), encryptTotpSecret(totpSecret), invitation.invitedByPlatformAdminId],
     );
     await connection.execute('UPDATE PlatformAdminInvitations SET acceptedAt = UTC_TIMESTAMP() WHERE id = ?', [invitation.id]);
-    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId) VALUES (?, ?, ?, ?, ?)', [randomUUID(), invitation.invitedByPlatformAdminId, 'platform_admin.invitation_accepted', 'platform_admin', id]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), id, 'platform_admin.invitation_accepted', 'platform_admin', id, 'New platform administrator accepted an invitation and enrolled MFA']);
     await connection.commit();
     await createPlatformSession(id, res);
     res.status(201).json({ success: true });
@@ -787,7 +787,7 @@ app.get('/api/platform/workspace-invitations/:token', async (req, res) => {
     const [rows]: any = await pool.execute(
       `SELECT i.email, w.name AS workspaceName FROM PlatformWorkspaceAdminInvitations i
        JOIN Workspaces w ON w.id = i.workspaceId
-       WHERE i.tokenHash = ? AND i.acceptedAt IS NULL AND i.expiresAt > UTC_TIMESTAMP() AND w.lifecycleStatus <> 'archived' LIMIT 1`,
+       WHERE i.tokenHash = ? AND i.acceptedAt IS NULL AND i.revokedAt IS NULL AND i.expiresAt > UTC_TIMESTAMP() AND w.lifecycleStatus <> 'archived' LIMIT 1`,
       [hashToken(token)],
     );
     if (!rows.length) return res.status(404).json({ error: 'College administrator invitation is invalid or expired.' });
@@ -804,14 +804,19 @@ app.post('/api/platform/workspace-invitations/accept', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    const [invites]: any = await connection.execute(
-      `SELECT * FROM PlatformWorkspaceAdminInvitations WHERE tokenHash = ? AND acceptedAt IS NULL AND expiresAt > UTC_TIMESTAMP() LIMIT 1 FOR UPDATE`,
+    const [invitePreviews]: any = await connection.execute(
+      `SELECT id, workspaceId FROM PlatformWorkspaceAdminInvitations WHERE tokenHash = ? AND acceptedAt IS NULL AND revokedAt IS NULL AND expiresAt > UTC_TIMESTAMP() LIMIT 1`,
       [hashToken(token)],
     );
-    if (!invites.length) { await connection.rollback(); return res.status(400).json({ error: 'College administrator invitation is invalid or expired.' }); }
-    const invitation = invites[0];
-    const [workspaces]: any = await connection.execute('SELECT lifecycleStatus FROM Workspaces WHERE id = ? LIMIT 1 FOR UPDATE', [invitation.workspaceId]);
+    if (!invitePreviews.length) { await connection.rollback(); return res.status(400).json({ error: 'College administrator invitation is invalid, revoked, or expired.' }); }
+    const [workspaces]: any = await connection.execute('SELECT id, lifecycleStatus FROM Workspaces WHERE id = ? LIMIT 1 FOR UPDATE', [invitePreviews[0].workspaceId]);
     if (!workspaces.length || ['suspended', 'archived'].includes(workspaces[0].lifecycleStatus)) { await connection.rollback(); return res.status(403).json({ error: 'This college workspace is not accepting administrator invitations.' }); }
+    const [invites]: any = await connection.execute(
+      `SELECT * FROM PlatformWorkspaceAdminInvitations WHERE id = ? AND tokenHash = ? AND acceptedAt IS NULL AND revokedAt IS NULL AND expiresAt > UTC_TIMESTAMP() LIMIT 1 FOR UPDATE`,
+      [invitePreviews[0].id, hashToken(token)],
+    );
+    if (!invites.length) { await connection.rollback(); return res.status(400).json({ error: 'College administrator invitation is invalid, revoked, or expired.' }); }
+    const invitation = invites[0];
     const [users]: any = await connection.execute('SELECT id, passwordHash FROM Users WHERE email = ? LIMIT 1 FOR UPDATE', [invitation.email]);
     let userId = users[0]?.id;
     if (users[0]?.passwordHash) {
@@ -827,7 +832,7 @@ app.post('/api/platform/workspace-invitations/accept', async (req, res) => {
     await connection.execute('UPDATE PlatformWorkspaceAdminInvitations SET acceptedAt = UTC_TIMESTAMP() WHERE id = ?', [invitation.id]);
     await ensureWorkspaceSubscription(connection, invitation.workspaceId);
     await ensureWorkspaceAssessments(connection, invitation.workspaceId, userId);
-    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), invitation.invitedByPlatformAdminId, 'workspace.initial_admin_added', 'workspace', invitation.workspaceId, `Initial administrator invitation accepted by ${invitation.email}`]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason) VALUES (?, NULL, ?, ?, ?, ?)', [randomUUID(), 'workspace.initial_admin_added', 'workspace', invitation.workspaceId, `Initial college administrator invitation accepted by ${invitation.email}`]);
     await connection.commit();
     await createSession(userId, invitation.workspaceId, res);
     res.status(201).json({ success: true });
@@ -870,10 +875,337 @@ app.get('/api/platform/overview', requirePlatformAdmin, async (req, res) => {
       `SELECT COUNT(*) AS activeStudents FROM WorkspaceMemberships m JOIN Workspaces w ON w.id = m.workspaceId
        WHERE m.role = 'student' AND m.status = 'active' AND w.lifecycleStatus IN ('onboarding', 'active')`,
     );
-    res.json({ ...rows[0], activeStudents: Number(usage[0]?.activeStudents || 0), subscriptions: subs.map((item: any) => ({ status: item.status, count: Number(item.count) })) });
+    const [operationalWorkspaces]: any = await pool.query(
+      `SELECT w.id, w.name, w.lifecycleStatus, COALESCE(s.planId, 'pilot') AS planId,
+              TIMESTAMPDIFF(DAY, w.createdAt, UTC_TIMESTAMP()) AS ageDays,
+              (SELECT COUNT(*) FROM WorkspaceMemberships m WHERE m.workspaceId = w.id AND m.role = 'student' AND m.status = 'active') AS activeStudents,
+              (SELECT COUNT(*) FROM WorkspaceMemberships m WHERE m.workspaceId = w.id AND m.role IN ('trainer', 'panelist') AND m.status = 'active') AS trainerSeats,
+              (SELECT COUNT(*) FROM Batches b WHERE b.workspaceId = w.id AND b.isArchived = 0) AS activeBatches
+       FROM Workspaces w LEFT JOIN WorkspaceSubscriptions s ON s.workspaceId = w.id
+       WHERE w.lifecycleStatus IN ('onboarding', 'active')`,
+    );
+    const [actionableInvitations]: any = await pool.query(
+      `SELECT i.id, i.workspaceId, i.email, w.name AS workspaceName, i.expiresAt,
+              i.expiresAt <= UTC_TIMESTAMP() AS expired,
+              DATE_FORMAT(i.expiresAt, '%Y-%m-%d %H:%i:%s') AS expiresAtText
+       FROM PlatformWorkspaceAdminInvitations i JOIN Workspaces w ON w.id = i.workspaceId
+       WHERE i.acceptedAt IS NULL AND i.revokedAt IS NULL
+         AND w.lifecycleStatus IN ('onboarding', 'active')
+         AND (i.expiresAt <= UTC_TIMESTAMP() OR i.expiresAt <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 24 HOUR))
+         AND NOT EXISTS (
+           SELECT 1 FROM PlatformWorkspaceAdminInvitations newer
+           WHERE newer.workspaceId = i.workspaceId AND newer.email = i.email
+             AND (newer.createdAt > i.createdAt OR (newer.createdAt = i.createdAt AND newer.id > i.id))
+         )
+       ORDER BY i.expiresAt ASC`,
+    );
+    const alerts: Array<{ id: string; type: string; severity: 'warning' | 'high' | 'critical'; workspaceId: string; workspaceName: string; title: string; message: string; value?: number; limit?: number; percent?: number }> = [];
+    const addAlert = (alert: typeof alerts[number]) => alerts.push(alert);
+    for (const workspace of operationalWorkspaces) {
+      if (workspace.lifecycleStatus === 'onboarding' && Number(workspace.ageDays) >= 7) {
+        const days = Number(workspace.ageDays);
+        addAlert({ id: `onboarding:${workspace.id}`, type: 'onboarding', severity: days >= 14 ? 'high' : 'warning', workspaceId: workspace.id, workspaceName: workspace.name, title: 'Onboarding is taking longer than expected', message: `Workspace has remained in onboarding for ${days} days.` });
+      }
+      const plan = getPlanDefinition(workspace.planId);
+      const capacityMetrics: Array<{ key: PlanLimitKey; label: string; usage: number }> = [
+        { key: 'active_students', label: 'students', usage: Number(workspace.activeStudents) },
+        { key: 'trainer_seats', label: 'trainer seats', usage: Number(workspace.trainerSeats) },
+        { key: 'active_batches', label: 'active batches', usage: Number(workspace.activeBatches) },
+      ];
+      for (const metric of capacityMetrics) {
+        const limit = plan.limits.find((entry) => entry.key === metric.key)?.value ?? null;
+        if (limit === null || limit <= 0) continue;
+        const percent = Math.floor((metric.usage / limit) * 100);
+        if (percent < 80) continue;
+        addAlert({ id: `capacity:${workspace.id}:${metric.key}`, type: 'capacity', severity: percent >= 100 ? 'critical' : percent >= 90 ? 'high' : 'warning', workspaceId: workspace.id, workspaceName: workspace.name, title: `${plan.name} ${metric.label} capacity`, message: `${metric.usage} of ${limit} ${metric.label} in use (${percent}%).`, value: metric.usage, limit, percent });
+      }
+    }
+    for (const invitation of actionableInvitations) {
+      const expired = Number(invitation.expired) === 1;
+      addAlert({ id: `invitation:${invitation.id}`, type: 'invitation', severity: expired ? 'high' : 'warning', workspaceId: invitation.workspaceId, workspaceName: invitation.workspaceName, title: expired ? 'College-admin invitation expired' : 'College-admin invitation expiring soon', message: `${invitation.email} · ${expired ? 'expired' : 'expires'} ${invitation.expiresAtText} UTC.` });
+    }
+    const severityOrder = { critical: 0, high: 1, warning: 2 };
+    alerts.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity] || a.workspaceName.localeCompare(b.workspaceName) || a.title.localeCompare(b.title));
+    res.json({ ...rows[0], activeStudents: Number(usage[0]?.activeStudents || 0), subscriptions: subs.map((item: any) => ({ status: item.status, count: Number(item.count) })), alerts, alertSummary: { total: alerts.length, critical: alerts.filter((alert) => alert.severity === 'critical').length, high: alerts.filter((alert) => alert.severity === 'high').length, warning: alerts.filter((alert) => alert.severity === 'warning').length } });
   } catch (error) {
     console.error('Platform overview query failed:', error);
     res.status(500).json({ error: 'Could not load platform overview.' });
+  }
+});
+
+app.get('/api/platform/content/versions', requirePlatformAdmin, async (_req, res) => {
+  try {
+    const [rows]: any = await pool.query(
+      `SELECT v.id, v.versionNumber, v.title, v.status,
+              DATE_FORMAT(v.createdAt, '%Y-%m-%d %H:%i:%s') AS createdAt,
+              DATE_FORMAT(v.publishedAt, '%Y-%m-%d %H:%i:%s') AS publishedAt,
+              creator.name AS createdBy, publisher.name AS publishedBy,
+              (SELECT COUNT(*) FROM PlatformSharedContentApplications a WHERE a.versionId = v.id) AS appliedWorkspaceCount,
+              v.contentJson
+       FROM PlatformSharedContentVersions v
+       LEFT JOIN PlatformAdminAccounts creator ON creator.id = v.createdByPlatformAdminId
+       LEFT JOIN PlatformAdminAccounts publisher ON publisher.id = v.publishedByPlatformAdminId
+       ORDER BY v.versionNumber DESC`,
+    );
+    res.json(rows.map((row: any) => {
+      const content = JSON.parse(row.contentJson || '{}');
+      return { id: row.id, versionNumber: Number(row.versionNumber), title: row.title, status: row.status, createdAt: row.createdAt, publishedAt: row.publishedAt, createdBy: row.createdBy, publishedBy: row.publishedBy, appliedWorkspaceCount: Number(row.appliedWorkspaceCount || 0), materialCount: Array.isArray(content.materials) ? content.materials.length : 0, assessmentCount: Array.isArray(content.enabledAssessmentIds) ? content.enabledAssessmentIds.length : 0 };
+    }));
+  } catch (error) {
+    console.error('Shared content versions query failed:', error);
+    res.status(500).json({ error: 'Could not load the shared content library.' });
+  }
+});
+
+app.get('/api/platform/content/versions/:id', requirePlatformAdmin, async (req, res) => {
+  try {
+    const [rows]: any = await pool.execute(
+      `SELECT v.id, v.versionNumber, v.title, v.status, v.contentJson,
+              DATE_FORMAT(v.createdAt, '%Y-%m-%d %H:%i:%s') AS createdAt,
+              DATE_FORMAT(v.publishedAt, '%Y-%m-%d %H:%i:%s') AS publishedAt
+       FROM PlatformSharedContentVersions v WHERE v.id = ? LIMIT 1`,
+      [req.params.id],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Shared content version not found.' });
+    const content = JSON.parse(rows[0].contentJson || '{}');
+    const assessmentTemplates = Array.isArray(content.assessmentTemplates) ? content.assessmentTemplates.map((assessment: any) => ({ id: assessment.id, dayNumber: assessment.dayNumber, title: assessment.title, type: assessment.type, durationMinutes: assessment.durationMinutes, totalMarks: assessment.totalMarks, questionCount: Array.isArray(assessment.sections) ? assessment.sections.reduce((count: number, section: any) => count + (Array.isArray(section.questions) ? section.questions.length : 0), 0) : 0 })) : [];
+    res.json({ id: rows[0].id, versionNumber: Number(rows[0].versionNumber), title: rows[0].title, status: rows[0].status, createdAt: rows[0].createdAt, publishedAt: rows[0].publishedAt, materials: Array.isArray(content.materials) ? content.materials : [], assessmentTemplates, enabledAssessmentIds: Array.isArray(content.enabledAssessmentIds) ? content.enabledAssessmentIds : [] });
+  } catch (error) {
+    console.error('Shared content version query failed:', error);
+    res.status(500).json({ error: 'Could not load this shared content version.' });
+  }
+});
+
+app.post('/api/platform/content/versions', requirePlatformAdmin, async (req, res) => {
+  const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [latest]: any = await connection.query('SELECT id, versionNumber, title, status, contentJson FROM PlatformSharedContentVersions ORDER BY versionNumber DESC LIMIT 1 FOR UPDATE');
+    if (!latest.length) throw new Error('The initial shared content package is missing. Run the database migration.');
+    const versionNumber = Number(latest[0].versionNumber) + 1;
+    const [published]: any = await connection.query('SELECT contentJson FROM PlatformSharedContentVersions WHERE status = \'published\' ORDER BY versionNumber DESC LIMIT 1');
+    const contentJson = published[0]?.contentJson || latest[0].contentJson;
+    const id = randomUUID();
+    const title = `Shared content draft v${versionNumber}`;
+    await connection.execute('INSERT INTO PlatformSharedContentVersions (id, versionNumber, title, status, contentJson, createdByPlatformAdminId) VALUES (?, ?, ?, \'draft\', ?, ?)', [id, versionNumber, title, contentJson, admin.platformAdminId]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'platform.shared_content_draft_created', 'shared_content_version', id, `Created draft v${versionNumber} from the latest published package or initial sample catalog`, JSON.stringify({ versionNumber, basedOnVersion: Number(latest[0].versionNumber) })]);
+    await connection.commit();
+    res.status(201).json({ id, versionNumber, title, status: 'draft' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Shared content draft creation failed:', error);
+    res.status(500).json({ error: error instanceof Error && error.message.includes('migration') ? error.message : 'Could not create a shared content draft.' });
+  } finally { connection.release(); }
+});
+
+app.put('/api/platform/content/versions/:id', requirePlatformAdmin, async (req, res) => {
+  const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const materialsInput = req.body?.materials;
+  const enabledIds = req.body?.enabledAssessmentIds;
+  if (title.length < 3 || title.length > 191 || !Array.isArray(materialsInput) || materialsInput.length > 300 || !Array.isArray(enabledIds) || enabledIds.length > 500) return res.status(400).json({ error: 'Enter a version title, no more than 300 materials, and a valid list of sample assessments.' });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows]: any = await connection.execute('SELECT versionNumber, status, contentJson FROM PlatformSharedContentVersions WHERE id = ? LIMIT 1 FOR UPDATE', [req.params.id]);
+    if (!rows.length) { await connection.rollback(); return res.status(404).json({ error: 'Shared content version not found.' }); }
+    if (rows[0].status !== 'draft') { await connection.rollback(); return res.status(409).json({ error: 'Published content versions are immutable. Create a new draft to make changes.' }); }
+    const content = JSON.parse(rows[0].contentJson || '{}');
+    const templates = Array.isArray(content.assessmentTemplates) ? content.assessmentTemplates : [];
+    const allowedAssessmentIds = new Set(templates.map((item: any) => String(item.id)));
+    if (enabledIds.some((id: any) => typeof id !== 'string' || !allowedAssessmentIds.has(id)) || new Set(enabledIds).size !== enabledIds.length) { await connection.rollback(); return res.status(400).json({ error: 'The selected sample assessments are invalid or duplicated.' }); }
+    const seenMaterialIds = new Set<string>();
+    const materials = [];
+    for (const item of materialsInput) {
+      const id = typeof item?.id === 'string' && item.id.length > 0 ? item.id : randomUUID();
+      const dayNumber = Number(item?.dayNumber);
+      const materialTitle = typeof item?.title === 'string' ? item.title.trim() : '';
+      const materialType = item?.materialType;
+      const contentFormat = item?.contentFormat || 'markdown';
+      const isRequired = item?.isRequired !== false;
+      const position = Number.isInteger(item?.position) && item.position >= 0 ? item.position : materials.length;
+      let contentUrl: string | null = null;
+      const contentText = typeof item?.contentText === 'string' ? item.contentText : '';
+      if (item?.contentUrl) {
+        try { const parsed = new URL(item.contentUrl); if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('protocol'); contentUrl = parsed.toString(); }
+        catch { await connection.rollback(); return res.status(400).json({ error: `Material “${materialTitle || id}” needs a valid HTTP or HTTPS link.` }); }
+      }
+      if (seenMaterialIds.has(id) || !Number.isInteger(dayNumber) || dayNumber < 1 || dayNumber > 40 || materialTitle.length < 2 || materialTitle.length > 191 || !['video', 'text', 'pdf'].includes(materialType) || !['markdown', 'html'].includes(contentFormat) || (materialType === 'text' ? !contentText.trim() || contentText.length > 50000 || contentUrl !== null : !contentUrl || contentText.length > 0)) {
+        await connection.rollback();
+        return res.status(400).json({ error: `Material “${materialTitle || id}” has invalid day, title, type, format, or content.` });
+      }
+      seenMaterialIds.add(id);
+      materials.push({ id, dayNumber, title: materialTitle, materialType, contentUrl, contentText: materialType === 'text' ? contentText : null, contentFormat, position, isRequired });
+    }
+    content.schemaVersion = 1;
+    content.materials = materials;
+    content.enabledAssessmentIds = enabledIds;
+    await connection.execute('UPDATE PlatformSharedContentVersions SET title = ?, contentJson = ? WHERE id = ?', [title, JSON.stringify(content), req.params.id]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'platform.shared_content_draft_updated', 'shared_content_version', req.params.id, 'Draft materials and assessment selection updated', JSON.stringify({ title, materialCount: materials.length, assessmentCount: enabledIds.length })]);
+    await connection.commit();
+    res.json({ success: true, id: req.params.id, title, materialCount: materials.length, assessmentCount: enabledIds.length });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Shared content draft update failed:', error);
+    res.status(500).json({ error: 'Could not save this shared content draft.' });
+  } finally { connection.release(); }
+});
+
+app.post('/api/platform/content/versions/:id/publish', requirePlatformAdmin, async (req, res) => {
+  const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Provide a publish reason of at least five characters.' });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows]: any = await connection.execute('SELECT versionNumber, title, status, contentJson FROM PlatformSharedContentVersions WHERE id = ? LIMIT 1 FOR UPDATE', [req.params.id]);
+    if (!rows.length) { await connection.rollback(); return res.status(404).json({ error: 'Shared content version not found.' }); }
+    if (rows[0].status !== 'draft') { await connection.rollback(); return res.status(409).json({ error: 'This content version is already published and immutable.' }); }
+    const content = JSON.parse(rows[0].contentJson || '{}');
+    if (!(content.materials?.length || content.enabledAssessmentIds?.length)) { await connection.rollback(); return res.status(400).json({ error: 'Add at least one learning material or include at least one sample assessment before publishing.' }); }
+    await connection.execute("UPDATE PlatformSharedContentVersions SET status = 'published', publishedByPlatformAdminId = ?, publishedAt = UTC_TIMESTAMP() WHERE id = ?", [admin.platformAdminId, req.params.id]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, beforeJson, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'platform.shared_content_published', 'shared_content_version', req.params.id, reason, JSON.stringify({ status: 'draft' }), JSON.stringify({ status: 'published', versionNumber: Number(rows[0].versionNumber), title: rows[0].title })]);
+    await connection.commit();
+    res.json({ success: true, versionNumber: Number(rows[0].versionNumber), title: rows[0].title });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Shared content publish failed:', error);
+    res.status(500).json({ error: 'Could not publish this shared content version.' });
+  } finally { connection.release(); }
+});
+
+app.post('/api/platform/content/versions/:id/apply', requirePlatformAdmin, async (req, res) => {
+  const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
+  const workspaceId = typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : '';
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (!workspaceId || reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Select a college and provide an apply reason of at least five characters.' });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [workspaces]: any = await connection.execute('SELECT id, name, lifecycleStatus FROM Workspaces WHERE id = ? LIMIT 1 FOR UPDATE', [workspaceId]);
+    if (!workspaces.length) { await connection.rollback(); return res.status(404).json({ error: 'College workspace not found.' }); }
+    if (['suspended', 'archived'].includes(workspaces[0].lifecycleStatus)) { await connection.rollback(); return res.status(409).json({ error: 'Reactivate this college before applying shared content.' }); }
+    const [versions]: any = await connection.execute("SELECT versionNumber, title, status, contentJson FROM PlatformSharedContentVersions WHERE id = ? LIMIT 1 FOR UPDATE", [req.params.id]);
+    if (!versions.length) { await connection.rollback(); return res.status(404).json({ error: 'Shared content version not found.' }); }
+    if (versions[0].status !== 'published') { await connection.rollback(); return res.status(409).json({ error: 'Only published shared content can be applied to a college.' }); }
+    const content = JSON.parse(versions[0].contentJson || '{}');
+    const versionId = req.params.id;
+    let materialAdded = 0; let materialUpdated = 0; let materialPreserved = 0;
+    const localPositions: Record<number, number> = {};
+    for (const material of content.materials || []) {
+      if (localPositions[material.dayNumber] === undefined) {
+        const [[position]]: any = await connection.execute('SELECT COALESCE(MAX(position), -1) AS position FROM WorkspaceCurriculumMaterials WHERE workspaceId = ? AND dayNumber = ? AND sourceContentId IS NULL', [workspaceId, material.dayNumber]);
+        localPositions[material.dayNumber] = Number(position.position) + 1;
+      }
+      const position = localPositions[material.dayNumber] + Number(material.position || 0);
+      const [existing]: any = await connection.execute('SELECT id, isCustomized FROM WorkspaceCurriculumMaterials WHERE workspaceId = ? AND sourceContentId = ? LIMIT 1 FOR UPDATE', [workspaceId, material.id]);
+      if (!existing.length) {
+        await connection.execute(
+          `INSERT INTO WorkspaceCurriculumMaterials (id, workspaceId, dayNumber, title, materialType, contentUrl, contentText, contentFormat, position, isRequired, sourceContentId, sourceVersionId, isCustomized)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+          [randomUUID(), workspaceId, material.dayNumber, material.title, material.materialType, material.contentUrl, material.contentText, material.contentFormat || 'markdown', position, material.isRequired ? 1 : 0, material.id, versionId],
+        );
+        materialAdded += 1;
+      } else if (Number(existing[0].isCustomized)) materialPreserved += 1;
+      else {
+        await connection.execute(
+          `UPDATE WorkspaceCurriculumMaterials SET dayNumber = ?, title = ?, materialType = ?, contentUrl = ?, contentText = ?, contentFormat = ?, position = ?, isRequired = ?, sourceVersionId = ? WHERE id = ? AND workspaceId = ?`,
+          [material.dayNumber, material.title, material.materialType, material.contentUrl, material.contentText, material.contentFormat || 'markdown', position, material.isRequired ? 1 : 0, versionId, existing[0].id, workspaceId],
+        );
+        materialUpdated += 1;
+      }
+    }
+    let assessmentAdded = 0; let assessmentUpdated = 0; let assessmentPreserved = 0;
+    const enabledAssessmentIds = new Set(content.enabledAssessmentIds || []);
+    for (const assessment of content.assessmentTemplates || []) {
+      if (!enabledAssessmentIds.has(assessment.id)) continue;
+      const [existing]: any = await connection.execute('SELECT id, isCustomized FROM Assessments WHERE workspaceId = ? AND sourceContentId = ? LIMIT 1 FOR UPDATE', [workspaceId, assessment.id]);
+      const values = [assessment.dayNumber, assessment.title, assessment.type, assessment.durationMinutes, assessment.totalMarks, JSON.stringify(assessment.coverage || []), assessment.purpose || '', assessment.status || 'upcoming', assessment.scheduledDate || '', JSON.stringify(assessment.sections || []), JSON.stringify(assessment.targetCompanies || []), versionId];
+      if (!existing.length) {
+        await connection.execute(
+          `INSERT INTO Assessments (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, sourceContentId, sourceVersionId, isCustomized)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+          [`${workspaceId}:${assessment.id}`, workspaceId, ...values.slice(0, 11), assessment.id, versionId],
+        );
+        assessmentAdded += 1;
+      } else if (Number(existing[0].isCustomized)) assessmentPreserved += 1;
+      else {
+        await connection.execute(
+          `UPDATE Assessments SET dayNumber = ?, title = ?, type = ?, durationMinutes = ?, totalMarks = ?, coverageJson = ?, purpose = ?, status = ?, scheduledDate = ?, sectionsJson = ?, targetCompaniesJson = ?, sourceVersionId = ? WHERE id = ? AND workspaceId = ?`,
+          [...values, existing[0].id, workspaceId],
+        );
+        assessmentUpdated += 1;
+      }
+    }
+    const result = { materialAdded, materialUpdated, materialPreserved, assessmentAdded, assessmentUpdated, assessmentPreserved };
+    await connection.execute(
+      `INSERT INTO PlatformSharedContentApplications (id, workspaceId, versionId, appliedByPlatformAdminId, resultJson)
+       VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE appliedByPlatformAdminId = VALUES(appliedByPlatformAdminId), resultJson = VALUES(resultJson), appliedAt = UTC_TIMESTAMP()`,
+      [randomUUID(), workspaceId, versionId, admin.platformAdminId, JSON.stringify(result)],
+    );
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'platform.shared_content_applied', 'workspace', workspaceId, reason, JSON.stringify({ versionId, versionNumber: Number(versions[0].versionNumber), title: versions[0].title, ...result })]);
+    await connection.commit();
+    res.json({ success: true, workspaceName: workspaces[0].name, versionNumber: Number(versions[0].versionNumber), ...result });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Shared content apply failed:', error);
+    res.status(500).json({ error: 'Could not apply shared content to this college.' });
+  } finally { connection.release(); }
+});
+
+app.get('/api/platform/audit', requirePlatformAdmin, async (req, res) => {
+  const query = String(req.query.q || '').trim().slice(0, 120);
+  const action = String(req.query.action || '').trim().slice(0, 100);
+  const targetType = String(req.query.targetType || '').trim().slice(0, 50);
+  const dateFrom = String(req.query.dateFrom || '').trim();
+  const dateTo = String(req.query.dateTo || '').trim();
+  const validDate = (value: string) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!validDate(dateFrom) || !validDate(dateTo)) return res.status(400).json({ error: 'Use valid dates in YYYY-MM-DD format.' });
+  const parsedOffset = Number.parseInt(String(req.query.offset || '0'), 10);
+  const offset = Number.isFinite(parsedOffset) ? Math.min(100000, Math.max(0, parsedOffset)) : 0;
+  const params: any[] = [];
+  const filters: string[] = [];
+  if (query) {
+    const pattern = `%${query}%`;
+    filters.push('(a.action LIKE ? OR a.reason LIKE ? OR a.targetId LIKE ? OR actor.name LIKE ? OR actor.email LIKE ? OR w.name LIKE ?)');
+    params.push(pattern, pattern, pattern, pattern, pattern, pattern);
+  }
+  if (action) { filters.push('a.action LIKE ?'); params.push(`%${action}%`); }
+  if (targetType) { filters.push('a.targetType = ?'); params.push(targetType); }
+  if (dateFrom) { filters.push('a.createdAt >= CONCAT(?, \' 00:00:00\')'); params.push(dateFrom); }
+  if (dateTo) { filters.push('a.createdAt < DATE_ADD(CONCAT(?, \' 00:00:00\'), INTERVAL 1 DAY)'); params.push(dateTo); }
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  try {
+    const [totals]: any = await pool.execute(
+      `SELECT COUNT(*) AS total FROM PlatformAuditEvents a
+       LEFT JOIN PlatformAdminAccounts actor ON actor.id = a.platformAdminId
+       LEFT JOIN Workspaces w ON a.targetType = 'workspace' AND w.id = a.targetId
+       ${where}`,
+      params,
+    );
+    const [rows]: any = await pool.execute(
+      `SELECT a.id, a.action, a.targetType, a.targetId, a.reason,
+              DATE_FORMAT(a.createdAt, '%Y-%m-%d %H:%i:%s') AS createdAt,
+              COALESCE(actor.name, CASE WHEN a.action = 'workspace.initial_admin_added' THEN 'College administrator'
+                                        WHEN a.platformAdminId IS NULL THEN 'Local / system'
+                                        ELSE 'Former platform admin' END) AS actorName,
+              actor.email AS actorEmail,
+              CASE WHEN a.targetType = 'workspace' THEN COALESCE(w.name, a.targetId)
+                   WHEN a.targetType = 'platform_admin' THEN COALESCE(targetAdmin.email, a.targetId)
+                   ELSE a.targetId END AS targetName
+       FROM PlatformAuditEvents a
+       LEFT JOIN PlatformAdminAccounts actor ON actor.id = a.platformAdminId
+       LEFT JOIN Workspaces w ON a.targetType = 'workspace' AND w.id = a.targetId
+       LEFT JOIN PlatformAdminAccounts targetAdmin ON a.targetType = 'platform_admin' AND targetAdmin.id = a.targetId
+       ${where}
+       ORDER BY a.createdAt DESC, a.id DESC LIMIT 50 OFFSET ?`,
+      [...params, offset],
+    );
+    res.json({ items: rows, total: Number(totals[0]?.total || 0), offset, limit: 50 });
+  } catch (error) {
+    console.error('Platform audit search failed:', error);
+    res.status(500).json({ error: 'Could not load platform audit activity.' });
   }
 });
 
@@ -922,16 +1254,49 @@ app.get('/api/platform/workspaces/:id', requirePlatformAdmin, async (req, res) =
     );
     if (!rows.length) return res.status(404).json({ error: 'College workspace not found.' });
     const [contacts]: any = await pool.execute(
-      `SELECT u.name, u.email, m.status FROM WorkspaceMemberships m JOIN Users u ON u.id = m.userId
+      `SELECT u.name, u.email, m.status, u.isActive AS accountActive FROM WorkspaceMemberships m JOIN Users u ON u.id = m.userId
        WHERE m.workspaceId = ? AND m.role = 'college_admin' ORDER BY (m.status = 'active') DESC, u.name ASC`,
       [req.params.id],
     );
+    const [adminInvitations]: any = await pool.execute(
+      `SELECT i.id, i.email, i.acceptedAt IS NOT NULL AS accepted, i.revokedAt IS NOT NULL AS revoked,
+              i.expiresAt <= UTC_TIMESTAMP() AS expired,
+              DATE_FORMAT(i.createdAt, '%Y-%m-%d %H:%i:%s') AS createdAt,
+              DATE_FORMAT(i.expiresAt, '%Y-%m-%d %H:%i:%s') AS expiresAt,
+              DATE_FORMAT(i.acceptedAt, '%Y-%m-%d %H:%i:%s') AS acceptedAt,
+              DATE_FORMAT(i.revokedAt, '%Y-%m-%d %H:%i:%s') AS revokedAt,
+              a.name AS invitedBy
+       FROM PlatformWorkspaceAdminInvitations i
+       JOIN PlatformAdminAccounts a ON a.id = i.invitedByPlatformAdminId
+       WHERE i.workspaceId = ? ORDER BY i.createdAt DESC LIMIT 100`,
+      [req.params.id],
+    );
+    const invitationsWithStatus = adminInvitations.map((invitation: any) => ({
+      ...invitation,
+      status: invitation.accepted ? 'accepted' : invitation.revoked ? 'revoked' : invitation.expired ? 'expired' : 'pending',
+      canResend: !invitation.accepted && !invitation.revoked,
+      canRevoke: !invitation.accepted && !invitation.revoked && !invitation.expired,
+    }));
+    const initialAdminInvitation = invitationsWithStatus[invitationsWithStatus.length - 1] || null;
+    const activeCollegeAdminCount = contacts.filter((contact: any) => Number(contact.status === 'active') && Number(contact.accountActive) === 1).length;
     const [audit]: any = await pool.execute(
       `SELECT action, reason, DATE_FORMAT(createdAt, '%Y-%m-%d %H:%i:%s') AS createdAt
        FROM PlatformAuditEvents WHERE targetType = 'workspace' AND targetId = ? ORDER BY createdAt DESC LIMIT 20`,
       [req.params.id],
     );
-    res.json({ ...rows[0], collegeAdmins: contacts, recentPlatformActivity: audit });
+    res.json({
+      ...rows[0],
+      collegeAdmins: contacts,
+      adminInvitations: invitationsWithStatus,
+      initialAdminInvitation,
+      onboardingReadiness: {
+        workspaceCreated: true,
+        activeCollegeAdminCount,
+        hasActiveCollegeAdmin: activeCollegeAdminCount > 0,
+        canActivate: activeCollegeAdminCount > 0,
+      },
+      recentPlatformActivity: audit,
+    });
   } catch (error) {
     console.error('Platform workspace detail query failed:', error);
     res.status(500).json({ error: 'Could not load this workspace.' });
@@ -972,15 +1337,74 @@ app.post('/api/platform/workspaces/:id/admin-invitations', requirePlatformAdmin,
   const email = String(req.body?.email || '').trim().toLowerCase();
   if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid first college administrator email.' });
   const token = randomBytes(32).toString('base64url');
+  const connection = await pool.getConnection();
   try {
-    const [workspaces]: any = await pool.execute("SELECT id, lifecycleStatus FROM Workspaces WHERE id = ? LIMIT 1", [req.params.id]);
-    if (!workspaces.length) return res.status(404).json({ error: 'College workspace not found.' });
-    if (['suspended', 'archived'].includes(workspaces[0].lifecycleStatus)) return res.status(409).json({ error: 'Reactivate this workspace before inviting an administrator.' });
-    await pool.execute('UPDATE PlatformWorkspaceAdminInvitations SET expiresAt = UTC_TIMESTAMP() WHERE workspaceId = ? AND email = ? AND acceptedAt IS NULL', [req.params.id, email]);
-    await pool.execute('INSERT INTO PlatformWorkspaceAdminInvitations (id, workspaceId, email, tokenHash, invitedByPlatformAdminId, expiresAt) VALUES (?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 72 HOUR))', [randomUUID(), req.params.id, email, hashToken(token), admin.platformAdminId]);
-    await pool.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason) VALUES (?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'workspace.admin_invited', 'workspace', req.params.id, `Administrator invitation link generated for ${email}`]);
-    res.status(201).json({ inviteUrl: `${req.protocol}://${req.get('host')}/platform-admin?collegeInvite=${encodeURIComponent(token)}` });
-  } catch (error) { console.error('College administrator invitation resend failed:', error); res.status(500).json({ error: 'Could not create this college administrator invitation.' }); }
+    await connection.beginTransaction();
+    const [workspaces]: any = await connection.execute('SELECT id, lifecycleStatus FROM Workspaces WHERE id = ? LIMIT 1 FOR UPDATE', [req.params.id]);
+    if (!workspaces.length) { await connection.rollback(); return res.status(404).json({ error: 'College workspace not found.' }); }
+    if (['suspended', 'archived'].includes(workspaces[0].lifecycleStatus)) { await connection.rollback(); return res.status(409).json({ error: 'Reactivate this workspace before inviting an administrator.' }); }
+    const [existingAdmins]: any = await connection.execute('SELECT id FROM WorkspaceMemberships WHERE workspaceId = ? AND userId IN (SELECT id FROM Users WHERE email = ?) AND role = \'college_admin\' AND status = \'active\' LIMIT 1', [req.params.id, email]);
+    if (existingAdmins.length) { await connection.rollback(); return res.status(409).json({ error: 'This person is already an active college administrator.' }); }
+    await connection.execute(
+      'UPDATE PlatformWorkspaceAdminInvitations SET revokedAt = UTC_TIMESTAMP() WHERE workspaceId = ? AND email = ? AND acceptedAt IS NULL AND revokedAt IS NULL AND expiresAt > UTC_TIMESTAMP()',
+      [req.params.id, email],
+    );
+    const invitationId = randomUUID();
+    await connection.execute('INSERT INTO PlatformWorkspaceAdminInvitations (id, workspaceId, email, tokenHash, invitedByPlatformAdminId, expiresAt) VALUES (?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 72 HOUR))', [invitationId, req.params.id, email, hashToken(token), admin.platformAdminId]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'workspace.admin_invited', 'workspace', req.params.id, `Administrator invitation created for ${email}; prior pending links for this address were revoked`, JSON.stringify({ invitationId, email })]);
+    await connection.commit();
+    res.status(201).json({ invitationId, email, inviteUrl: `${req.protocol}://${req.get('host')}/platform-admin?collegeInvite=${encodeURIComponent(token)}` });
+  } catch (error) { await connection.rollback(); console.error('College administrator invitation creation failed:', error); res.status(500).json({ error: 'Could not create this college administrator invitation.' }); }
+  finally { connection.release(); }
+});
+
+app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/resend', requirePlatformAdmin, async (req, res) => {
+  const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Provide a reason of at least five characters for resending this invitation.' });
+  const token = randomBytes(32).toString('base64url');
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [workspaces]: any = await connection.execute('SELECT id, lifecycleStatus FROM Workspaces WHERE id = ? LIMIT 1 FOR UPDATE', [req.params.id]);
+    if (!workspaces.length) { await connection.rollback(); return res.status(404).json({ error: 'College workspace not found.' }); }
+    if (['suspended', 'archived'].includes(workspaces[0].lifecycleStatus)) { await connection.rollback(); return res.status(409).json({ error: 'Reactivate this workspace before resending an administrator invitation.' }); }
+    const [invites]: any = await connection.execute('SELECT id, email, acceptedAt, revokedAt, expiresAt > UTC_TIMESTAMP() AS pending FROM PlatformWorkspaceAdminInvitations WHERE id = ? AND workspaceId = ? LIMIT 1 FOR UPDATE', [req.params.invitationId, req.params.id]);
+    if (!invites.length) { await connection.rollback(); return res.status(404).json({ error: 'Administrator invitation not found.' }); }
+    if (invites[0].acceptedAt) { await connection.rollback(); return res.status(409).json({ error: 'This invitation has already been accepted. Create a new invitation for another administrator.' }); }
+    if (invites[0].revokedAt) { await connection.rollback(); return res.status(409).json({ error: 'This invitation was revoked. Create a new invitation instead.' }); }
+    const [activeAdmins]: any = await connection.execute('SELECT id FROM WorkspaceMemberships WHERE workspaceId = ? AND userId IN (SELECT id FROM Users WHERE email = ?) AND role = \'college_admin\' AND status = \'active\' LIMIT 1', [req.params.id, invites[0].email]);
+    if (activeAdmins.length) { await connection.rollback(); return res.status(409).json({ error: 'This person is already an active college administrator.' }); }
+    await connection.execute('UPDATE PlatformWorkspaceAdminInvitations SET revokedAt = UTC_TIMESTAMP() WHERE workspaceId = ? AND email = ? AND acceptedAt IS NULL AND revokedAt IS NULL AND expiresAt > UTC_TIMESTAMP()', [req.params.id, invites[0].email]);
+    const newInvitationId = randomUUID();
+    await connection.execute('INSERT INTO PlatformWorkspaceAdminInvitations (id, workspaceId, email, tokenHash, invitedByPlatformAdminId, expiresAt) VALUES (?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 72 HOUR))', [newInvitationId, req.params.id, invites[0].email, hashToken(token), admin.platformAdminId]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, beforeJson, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'workspace.admin_invitation_resent', 'workspace', req.params.id, reason, JSON.stringify({ invitationId: invites[0].id, email: invites[0].email }), JSON.stringify({ invitationId: newInvitationId, email: invites[0].email })]);
+    await connection.commit();
+    res.json({ invitationId: newInvitationId, email: invites[0].email, inviteUrl: `${req.protocol}://${req.get('host')}/platform-admin?collegeInvite=${encodeURIComponent(token)}` });
+  } catch (error) { await connection.rollback(); console.error('College administrator invitation resend failed:', error); res.status(500).json({ error: 'Could not resend this college administrator invitation.' }); }
+  finally { connection.release(); }
+});
+
+app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/revoke', requirePlatformAdmin, async (req, res) => {
+  const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  if (reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Provide a reason of at least five characters for revoking this invitation.' });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [workspaces]: any = await connection.execute('SELECT id FROM Workspaces WHERE id = ? LIMIT 1 FOR UPDATE', [req.params.id]);
+    if (!workspaces.length) { await connection.rollback(); return res.status(404).json({ error: 'College workspace not found.' }); }
+    const [invites]: any = await connection.execute('SELECT id, email, acceptedAt, revokedAt, expiresAt > UTC_TIMESTAMP() AS pending FROM PlatformWorkspaceAdminInvitations WHERE id = ? AND workspaceId = ? LIMIT 1 FOR UPDATE', [req.params.invitationId, req.params.id]);
+    if (!invites.length) { await connection.rollback(); return res.status(404).json({ error: 'Administrator invitation not found.' }); }
+    if (invites[0].acceptedAt) { await connection.rollback(); return res.status(409).json({ error: 'An accepted invitation cannot be revoked. Deactivate the workspace member instead.' }); }
+    if (invites[0].revokedAt) { await connection.rollback(); return res.status(409).json({ error: 'This invitation has already been revoked.' }); }
+    if (!Number(invites[0].pending)) { await connection.rollback(); return res.status(409).json({ error: 'This invitation has expired already.' }); }
+    await connection.execute('UPDATE PlatformWorkspaceAdminInvitations SET revokedAt = UTC_TIMESTAMP() WHERE id = ?', [invites[0].id]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, beforeJson, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'workspace.admin_invitation_revoked', 'workspace', req.params.id, reason, JSON.stringify({ invitationId: invites[0].id, email: invites[0].email, status: 'pending' }), JSON.stringify({ invitationId: invites[0].id, email: invites[0].email, status: 'revoked' })]);
+    await connection.commit();
+    res.json({ success: true });
+  } catch (error) { await connection.rollback(); console.error('College administrator invitation revoke failed:', error); res.status(500).json({ error: 'Could not revoke this college administrator invitation.' }); }
+  finally { connection.release(); }
 });
 
 app.patch('/api/platform/workspaces/:id/status', requirePlatformAdmin, async (req, res) => {
@@ -993,6 +1417,17 @@ app.patch('/api/platform/workspaces/:id/status', requirePlatformAdmin, async (re
     await connection.beginTransaction();
     const [rows]: any = await connection.execute('SELECT id, name, lifecycleStatus, statusReason FROM Workspaces WHERE id = ? LIMIT 1 FOR UPDATE', [req.params.id]);
     if (!rows.length) { await connection.rollback(); return res.status(404).json({ error: 'College workspace not found.' }); }
+    if (status === 'active') {
+      const [activeAdmins]: any = await connection.execute(
+        `SELECT 1 FROM WorkspaceMemberships m JOIN Users u ON u.id = m.userId
+         WHERE m.workspaceId = ? AND m.role = 'college_admin' AND m.status = 'active' AND u.isActive = 1 LIMIT 1`,
+        [req.params.id],
+      );
+      if (!activeAdmins.length) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'An active college administrator must accept the invitation before this workspace can be activated.' });
+      }
+    }
     const before = { lifecycleStatus: rows[0].lifecycleStatus, statusReason: rows[0].statusReason };
     const after = { lifecycleStatus: status, statusReason: reason };
     await connection.execute('UPDATE Workspaces SET lifecycleStatus = ?, statusReason = ?, lifecycleUpdatedAt = UTC_TIMESTAMP() WHERE id = ?', [status, reason, req.params.id]);
@@ -2392,8 +2827,8 @@ app.post('/api/curriculum/materials', requireRole('college_admin', 'trainer'), a
     const [[positionRow]]: any = await pool.execute('SELECT COALESCE(MAX(position), -1) + 1 AS nextPosition FROM WorkspaceCurriculumMaterials WHERE workspaceId = ? AND dayNumber = ?', [auth.workspaceId, curriculumDayNumber]);
     await pool.execute(
       `INSERT INTO WorkspaceCurriculumMaterials
-       (id, workspaceId, dayNumber, title, materialType, contentUrl, contentText, contentFormat, position, isRequired, createdByUserId)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, workspaceId, dayNumber, title, materialType, contentUrl, contentText, contentFormat, position, isRequired, createdByUserId, isCustomized)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       [id, auth.workspaceId, curriculumDayNumber, normalizedTitle, materialType, normalizedUrl, materialType === 'text' ? normalizedText : null, contentFormat, positionRow.nextPosition, isRequired ? 1 : 0, auth.userId],
     );
     await pool.execute('INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
@@ -2431,7 +2866,7 @@ app.patch('/api/curriculum/materials/:id', requireRole('college_admin', 'trainer
       return res.status(400).json({ error: 'Enter a title and valid text or resource URL for this learning material.' });
     }
     await pool.execute(
-      `UPDATE WorkspaceCurriculumMaterials SET title = ?, materialType = ?, contentUrl = ?, contentText = ?, contentFormat = ?, isRequired = ? WHERE id = ? AND workspaceId = ?`,
+      `UPDATE WorkspaceCurriculumMaterials SET title = ?, materialType = ?, contentUrl = ?, contentText = ?, contentFormat = ?, isRequired = ?, isCustomized = 1 WHERE id = ? AND workspaceId = ?`,
       [nextTitle, nextType, nextType === 'text' ? null : nextUrl, nextType === 'text' ? nextText : null, nextFormat, required ? 1 : 0, req.params.id, auth.workspaceId],
     );
     await pool.execute('INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
@@ -3033,8 +3468,8 @@ app.post('/api/assessments', requireRole('college_admin', 'trainer'), async (req
     const id = randomUUID();
     await pool.execute(
       `INSERT INTO Assessments
-       (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId, batchId)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId, batchId, isCustomized)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       [id, auth.workspaceId, Number.isInteger(dayNumber) ? Math.max(1, Math.min(40, dayNumber)) : source?.dayNumber || 1, title.trim(), assessmentType, Number.isInteger(durationMinutes) ? Math.max(1, Math.min(600, durationMinutes)) : source?.durationMinutes || 60, computedMarks, JSON.stringify(Array.isArray(coverage) ? coverage.filter((item: any) => typeof item === 'string').slice(0, 50) : source ? JSON.parse(source.coverageJson) : []), typeof purpose === 'string' ? purpose.slice(0, 255) : source?.purpose || '', status, scheduledDate, JSON.stringify(parsedSections), JSON.stringify(Array.isArray(targetCompanies) ? targetCompanies.filter((item: any) => typeof item === 'string').slice(0, 50) : source ? JSON.parse(source.targetCompaniesJson) : []), auth.userId, batchId || null],
     );
     await pool.execute(
@@ -3077,7 +3512,7 @@ app.patch('/api/assessments/:id', requireRole('college_admin', 'trainer'), async
       `UPDATE Assessments SET title = COALESCE(?, title), dayNumber = COALESCE(?, dayNumber),
        durationMinutes = COALESCE(?, durationMinutes), purpose = COALESCE(?, purpose),
        status = COALESCE(?, status), scheduledDate = COALESCE(?, scheduledDate),
-       batchId = ? WHERE id = ? AND workspaceId = ?`,
+       batchId = ?, isCustomized = 1 WHERE id = ? AND workspaceId = ?`,
       [title === undefined ? null : title.trim(), dayNumber ?? null, durationMinutes ?? null, purpose ?? null, status ?? null, scheduledDate ?? null, batchId === undefined ? rows[0].batchId : batchId, id, auth.workspaceId],
     );
     await pool.execute(
