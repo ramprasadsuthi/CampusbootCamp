@@ -111,7 +111,7 @@ These should fit the tenant, role, and entitlement model, but are not required f
 
 ## Current implementation boundary
 
-The app now has authenticated workspace accounts, tenant-scoped membership, and selected MySQL-backed workflows. `src/types/subscriptions.ts` defines proposed tier capacities and a role permission registry. Workspace subscription status and usage are visible to college admins, and server-side quotas currently cover student/trainer invitations and activations, active batch creation/unarchiving, and provider-generated AI requests. These limits remain planning defaults; billing, invoice history, plan administration, and a separate platform-admin experience are not implemented. Role permissions are not yet centrally capability-enforced across all routes. The code-run endpoint remains a simulator rather than a production judging service.
+The app now has authenticated workspace accounts, tenant-scoped membership, and selected MySQL-backed workflows. `src/types/subscriptions.ts` provides seed defaults for the Pilot, Campus, and Campus Plus plans, and the platform-admin UI supports audited database-backed plan configuration and manual college subscription assignment with dates, status, and private internal notes. Workspace subscription status and usage are visible to college admins, and server-side quotas use the configured plan limits for student/trainer invitations and activations, active batch creation/unarchiving, and provider-generated AI requests. Prices, billing-provider integration, and invoice history are not implemented. Role permissions are not yet centrally capability-enforced across all routes. The code-run endpoint remains a simulator rather than a production judging service.
 
 ## Decisions still open
 

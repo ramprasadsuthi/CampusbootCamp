@@ -8,7 +8,7 @@ import mysql from 'mysql2/promise';
 import { ASSESSMENTS_CATALOG } from './src/data/assessmentData';
 import { CURRICULUM_40_DAYS } from './src/data/curriculumData';
 import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettings } from './src/types/auth';
-import { SUBSCRIPTION_PLANS, type PlanLimitKey, type WorkspaceSubscriptionOverview } from './src/types/subscriptions';
+import { SUBSCRIPTION_PLANS, type PlanFeature, type PlanLimit, type PlanLimitKey, type SubscriptionPlanDefinition, type WorkspaceSubscriptionOverview } from './src/types/subscriptions';
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { decryptTotpSecret, encryptTotpSecret, generateTotpSecret, verifyTotp } from './src/utils/platformSecurity';
@@ -89,9 +89,29 @@ function getPlanDefinition(planId: string) {
   return SUBSCRIPTION_PLANS.find((plan) => plan.id === planId) || SUBSCRIPTION_PLANS[0];
 }
 
+function parseStoredJson<T>(value: unknown, fallback: T): T {
+  if (typeof value === 'string') { try { return JSON.parse(value) as T; } catch { return fallback; } }
+  return (value as T) || fallback;
+}
+
+async function getPlanDefinitionFromDb(db: any, planId: string): Promise<SubscriptionPlanDefinition> {
+  const [rows]: any = await db.execute('SELECT id, name, description, limitsJson, featuresJson FROM PlatformSubscriptionPlans WHERE id = ? LIMIT 1', [planId]);
+  if (!rows.length) return getPlanDefinition(planId);
+  return {
+    id: rows[0].id,
+    name: rows[0].name,
+    description: rows[0].description,
+    currency: 'INR',
+    monthlyPricePaise: null,
+    annualPricePaise: null,
+    limits: parseStoredJson<PlanLimit[]>(rows[0].limitsJson, []),
+    features: parseStoredJson<PlanFeature[]>(rows[0].featuresJson, []),
+  };
+}
+
 async function getWorkspaceLimitState(db: any, workspaceId: string, key: PlanLimitKey) {
   const [subscriptionRows]: any = await db.execute('SELECT planId FROM WorkspaceSubscriptions WHERE workspaceId = ? LIMIT 1', [workspaceId]);
-  const plan = getPlanDefinition(subscriptionRows[0]?.planId || 'pilot');
+  const plan = await getPlanDefinitionFromDb(db, subscriptionRows[0]?.planId || 'pilot');
   const limit = plan.limits.find((item) => item.key === key)?.value ?? null;
   let usage = 0;
   if (key === 'active_students' || key === 'trainer_seats') {
@@ -134,7 +154,7 @@ async function reserveWorkspaceAiCredit(workspaceId: string) {
   try {
     await connection.beginTransaction();
     const [subscriptions]: any = await connection.execute('SELECT planId FROM WorkspaceSubscriptions WHERE workspaceId = ? FOR UPDATE', [workspaceId]);
-    const plan = getPlanDefinition(subscriptions[0]?.planId || 'pilot');
+    const plan = await getPlanDefinitionFromDb(connection, subscriptions[0]?.planId || 'pilot');
     if (!plan.features.includes('ai_insights')) {
       await connection.rollback();
       return { allowed: false as const, message: `${plan.name} does not include AI insights. Contact TalentEdge to discuss a plan change.` };
@@ -906,7 +926,7 @@ app.get('/api/platform/overview', requirePlatformAdmin, async (req, res) => {
         const days = Number(workspace.ageDays);
         addAlert({ id: `onboarding:${workspace.id}`, type: 'onboarding', severity: days >= 14 ? 'high' : 'warning', workspaceId: workspace.id, workspaceName: workspace.name, title: 'Onboarding is taking longer than expected', message: `Workspace has remained in onboarding for ${days} days.` });
       }
-      const plan = getPlanDefinition(workspace.planId);
+      const plan = await getPlanDefinitionFromDb(pool, workspace.planId);
       const capacityMetrics: Array<{ key: PlanLimitKey; label: string; usage: number }> = [
         { key: 'active_students', label: 'students', usage: Number(workspace.activeStudents) },
         { key: 'trainer_seats', label: 'trainer seats', usage: Number(workspace.trainerSeats) },
@@ -930,6 +950,65 @@ app.get('/api/platform/overview', requirePlatformAdmin, async (req, res) => {
   } catch (error) {
     console.error('Platform overview query failed:', error);
     res.status(500).json({ error: 'Could not load platform overview.' });
+  }
+});
+
+app.get('/api/platform/content/applications', requirePlatformAdmin, async (req, res) => {
+  const workspaceId = String(req.query.workspaceId || '').trim();
+  const dateFrom = String(req.query.dateFrom || '').trim();
+  const dateTo = String(req.query.dateTo || '').trim();
+  const isDate = (value: string) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!isDate(dateFrom) || !isDate(dateTo) || (dateFrom && dateTo && dateFrom > dateTo)) return res.status(400).json({ error: 'Choose a valid date range.' });
+  try {
+    const conditions: string[] = [];
+    const params: any[] = [];
+    if (workspaceId) { conditions.push('a.workspaceId = ?'); params.push(workspaceId); }
+    if (dateFrom) { conditions.push('a.appliedAt >= CONCAT(?, \' 00:00:00\')'); params.push(dateFrom); }
+    if (dateTo) { conditions.push('a.appliedAt < DATE_ADD(CONCAT(?, \' 00:00:00\'), INTERVAL 1 DAY)'); params.push(dateTo); }
+    const [rows]: any = await pool.execute(
+      `SELECT a.id, a.workspaceId, w.name AS workspaceName, a.versionId, v.versionNumber, v.title AS versionTitle,
+              a.appliedByPlatformAdminId, p.name AS appliedBy, a.reason, a.resultJson,
+              DATE_FORMAT(a.appliedAt, '%Y-%m-%d %H:%i:%s') AS appliedAt
+       FROM PlatformSharedContentApplications a
+       JOIN Workspaces w ON w.id = a.workspaceId
+       JOIN PlatformSharedContentVersions v ON v.id = a.versionId
+       JOIN PlatformAdminAccounts p ON p.id = a.appliedByPlatformAdminId
+       ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+       ORDER BY a.appliedAt DESC, a.id DESC LIMIT 500`,
+      params,
+    );
+    res.json(rows.map((row: any) => ({ ...row, versionNumber: Number(row.versionNumber), result: typeof row.resultJson === 'string' ? JSON.parse(row.resultJson || '{}') : row.resultJson || {} })));
+  } catch (error) {
+    console.error('Shared content application history query failed:', error);
+    res.status(500).json({ error: 'Could not load shared content application history.' });
+  }
+});
+
+app.get('/api/platform/content/rollout', requirePlatformAdmin, async (_req, res) => {
+  try {
+    const [rows]: any = await pool.query(
+      `SELECT w.id AS workspaceId, w.name AS workspaceName, w.lifecycleStatus,
+              published.id AS latestPublishedVersionId, published.versionNumber AS latestPublishedVersionNumber, published.title AS latestPublishedTitle,
+              applied.versionId AS appliedVersionId, appliedVersion.versionNumber AS appliedVersionNumber, appliedVersion.title AS appliedVersionTitle,
+              DATE_FORMAT(applied.appliedAt, '%Y-%m-%d %H:%i:%s') AS appliedAt
+       FROM Workspaces w
+       LEFT JOIN (SELECT id, versionNumber, title FROM PlatformSharedContentVersions WHERE status = 'published' ORDER BY versionNumber DESC LIMIT 1) published ON 1 = 1
+       LEFT JOIN PlatformSharedContentApplications applied ON applied.id = (
+         SELECT a.id FROM PlatformSharedContentApplications a WHERE a.workspaceId = w.id ORDER BY a.appliedAt DESC, a.id DESC LIMIT 1
+       )
+       LEFT JOIN PlatformSharedContentVersions appliedVersion ON appliedVersion.id = applied.versionId
+       ORDER BY w.name, w.id`,
+    );
+    const colleges = rows.map((row: any) => {
+      const eligible = ['onboarding', 'active'].includes(row.lifecycleStatus);
+      const status = !row.latestPublishedVersionId ? 'no_release' : !eligible ? 'excluded' : !row.appliedVersionId ? 'not_applied' : Number(row.appliedVersionNumber) < Number(row.latestPublishedVersionNumber) ? 'behind' : 'current';
+      return { workspaceId: row.workspaceId, workspaceName: row.workspaceName, lifecycleStatus: row.lifecycleStatus, appliedVersionId: row.appliedVersionId, appliedVersionNumber: row.appliedVersionNumber === null ? null : Number(row.appliedVersionNumber), appliedVersionTitle: row.appliedVersionTitle, appliedAt: row.appliedAt, latestPublishedVersionId: row.latestPublishedVersionId, latestPublishedVersionNumber: row.latestPublishedVersionNumber === null ? null : Number(row.latestPublishedVersionNumber), latestPublishedTitle: row.latestPublishedTitle, status };
+    });
+    const eligible = colleges.filter((college: any) => ['onboarding', 'active'].includes(college.lifecycleStatus));
+    res.json({ latestPublishedVersionNumber: colleges.find((college: any) => college.latestPublishedVersionNumber !== null)?.latestPublishedVersionNumber ?? null, totalEligible: eligible.length, current: eligible.filter((college: any) => college.status === 'current').length, behind: eligible.filter((college: any) => college.status === 'behind').length, notApplied: eligible.filter((college: any) => college.status === 'not_applied').length, colleges });
+  } catch (error) {
+    console.error('Shared content rollout query failed:', error);
+    res.status(500).json({ error: 'Could not load shared content rollout status.' });
   }
 });
 
@@ -1075,7 +1154,7 @@ app.post('/api/platform/content/versions/:id/publish', requirePlatformAdmin, asy
   } finally { connection.release(); }
 });
 
-app.post('/api/platform/content/versions/:id/apply', requirePlatformAdmin, async (req, res) => {
+const applySharedContentHandler = async (req: Request, res: Response, rollbackOnly = false) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const workspaceId = typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : '';
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
@@ -1089,8 +1168,22 @@ app.post('/api/platform/content/versions/:id/apply', requirePlatformAdmin, async
     const [versions]: any = await connection.execute("SELECT versionNumber, title, status, contentJson FROM PlatformSharedContentVersions WHERE id = ? LIMIT 1 FOR UPDATE", [req.params.id]);
     if (!versions.length) { await connection.rollback(); return res.status(404).json({ error: 'Shared content version not found.' }); }
     if (versions[0].status !== 'published') { await connection.rollback(); return res.status(409).json({ error: 'Only published shared content can be applied to a college.' }); }
+    if (rollbackOnly) {
+      const [latestApplications]: any = await connection.execute(
+        `SELECT v.versionNumber FROM PlatformSharedContentApplications a
+         JOIN PlatformSharedContentVersions v ON v.id = a.versionId
+         WHERE a.workspaceId = ? ORDER BY a.appliedAt DESC, a.id DESC LIMIT 1 FOR UPDATE`,
+        [workspaceId],
+      );
+      if (!latestApplications.length || Number(versions[0].versionNumber) >= Number(latestApplications[0].versionNumber)) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'Rollback requires a published version older than the most recently applied release for this college.' });
+      }
+    }
     const content = JSON.parse(versions[0].contentJson || '{}');
     const versionId = req.params.id;
+    const [archivedMaterials]: any = await connection.execute('UPDATE WorkspaceCurriculumMaterials SET isArchived = 1 WHERE workspaceId = ? AND sourceContentId IS NOT NULL AND isCustomized = 0 AND isArchived = 0', [workspaceId]);
+    const [archivedAssessments]: any = await connection.execute('UPDATE Assessments SET isArchived = 1 WHERE workspaceId = ? AND sourceContentId IS NOT NULL AND isCustomized = 0 AND isArchived = 0', [workspaceId]);
     let materialAdded = 0; let materialUpdated = 0; let materialPreserved = 0;
     const localPositions: Record<number, number> = {};
     for (const material of content.materials || []) {
@@ -1110,7 +1203,7 @@ app.post('/api/platform/content/versions/:id/apply', requirePlatformAdmin, async
       } else if (Number(existing[0].isCustomized)) materialPreserved += 1;
       else {
         await connection.execute(
-          `UPDATE WorkspaceCurriculumMaterials SET dayNumber = ?, title = ?, materialType = ?, contentUrl = ?, contentText = ?, contentFormat = ?, position = ?, isRequired = ?, sourceVersionId = ? WHERE id = ? AND workspaceId = ?`,
+          `UPDATE WorkspaceCurriculumMaterials SET dayNumber = ?, title = ?, materialType = ?, contentUrl = ?, contentText = ?, contentFormat = ?, position = ?, isRequired = ?, sourceVersionId = ?, isArchived = 0 WHERE id = ? AND workspaceId = ?`,
           [material.dayNumber, material.title, material.materialType, material.contentUrl, material.contentText, material.contentFormat || 'markdown', position, material.isRequired ? 1 : 0, versionId, existing[0].id, workspaceId],
         );
         materialUpdated += 1;
@@ -1132,27 +1225,30 @@ app.post('/api/platform/content/versions/:id/apply', requirePlatformAdmin, async
       } else if (Number(existing[0].isCustomized)) assessmentPreserved += 1;
       else {
         await connection.execute(
-          `UPDATE Assessments SET dayNumber = ?, title = ?, type = ?, durationMinutes = ?, totalMarks = ?, coverageJson = ?, purpose = ?, status = ?, scheduledDate = ?, sectionsJson = ?, targetCompaniesJson = ?, sourceVersionId = ? WHERE id = ? AND workspaceId = ?`,
+          `UPDATE Assessments SET dayNumber = ?, title = ?, type = ?, durationMinutes = ?, totalMarks = ?, coverageJson = ?, purpose = ?, status = ?, scheduledDate = ?, sectionsJson = ?, targetCompaniesJson = ?, sourceVersionId = ?, isArchived = 0 WHERE id = ? AND workspaceId = ?`,
           [...values, existing[0].id, workspaceId],
         );
         assessmentUpdated += 1;
       }
     }
-    const result = { materialAdded, materialUpdated, materialPreserved, assessmentAdded, assessmentUpdated, assessmentPreserved };
+    const result = { materialAdded, materialUpdated, materialPreserved, materialArchived: Number(archivedMaterials.affectedRows || 0), assessmentAdded, assessmentUpdated, assessmentPreserved, assessmentArchived: Number(archivedAssessments.affectedRows || 0) };
     await connection.execute(
-      `INSERT INTO PlatformSharedContentApplications (id, workspaceId, versionId, appliedByPlatformAdminId, resultJson)
-       VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE appliedByPlatformAdminId = VALUES(appliedByPlatformAdminId), resultJson = VALUES(resultJson), appliedAt = UTC_TIMESTAMP()`,
-      [randomUUID(), workspaceId, versionId, admin.platformAdminId, JSON.stringify(result)],
+      `INSERT INTO PlatformSharedContentApplications (id, workspaceId, versionId, appliedByPlatformAdminId, reason, resultJson)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [randomUUID(), workspaceId, versionId, admin.platformAdminId, reason, JSON.stringify(result)],
     );
-    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'platform.shared_content_applied', 'workspace', workspaceId, reason, JSON.stringify({ versionId, versionNumber: Number(versions[0].versionNumber), title: versions[0].title, ...result })]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, rollbackOnly ? 'platform.shared_content_rolled_back' : 'platform.shared_content_applied', 'workspace', workspaceId, reason, JSON.stringify({ versionId, versionNumber: Number(versions[0].versionNumber), title: versions[0].title, ...result })]);
     await connection.commit();
-    res.json({ success: true, workspaceName: workspaces[0].name, versionNumber: Number(versions[0].versionNumber), ...result });
+    res.json({ success: true, workspaceName: workspaces[0].name, versionNumber: Number(versions[0].versionNumber), rolledBack: rollbackOnly, ...result });
   } catch (error) {
     await connection.rollback();
     console.error('Shared content apply failed:', error);
     res.status(500).json({ error: 'Could not apply shared content to this college.' });
   } finally { connection.release(); }
-});
+};
+
+app.post('/api/platform/content/versions/:id/apply', requirePlatformAdmin, (req, res) => applySharedContentHandler(req, res));
+app.post('/api/platform/content/versions/:id/rollback', requirePlatformAdmin, (req, res) => applySharedContentHandler(req, res, true));
 
 app.get('/api/platform/audit', requirePlatformAdmin, async (req, res) => {
   const query = String(req.query.q || '').trim().slice(0, 120);
@@ -1209,6 +1305,85 @@ app.get('/api/platform/audit', requirePlatformAdmin, async (req, res) => {
   }
 });
 
+app.get('/api/platform/plans', requirePlatformAdmin, async (_req, res) => {
+  try {
+    const [rows]: any = await pool.query('SELECT id, name, description, limitsJson, featuresJson, isActive, DATE_FORMAT(updatedAt, \'%Y-%m-%d %H:%i:%s\') AS updatedAt FROM PlatformSubscriptionPlans ORDER BY FIELD(id, \'pilot\', \'campus\', \'campus_plus\')');
+    res.json(rows.map((row: any) => ({ id: row.id, name: row.name, description: row.description, limits: parseStoredJson<PlanLimit[]>(row.limitsJson, []), features: parseStoredJson<PlanFeature[]>(row.featuresJson, []), isActive: Boolean(row.isActive), updatedAt: row.updatedAt })));
+  } catch (error) {
+    console.error('Subscription plan catalog query failed:', error);
+    res.status(500).json({ error: 'Could not load subscription plans. Apply the latest database migration.' });
+  }
+});
+
+app.put('/api/platform/plans/:id', requirePlatformAdmin, async (req, res) => {
+  const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
+  const planId = req.params.id;
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const description = typeof req.body?.description === 'string' ? req.body.description.trim() : '';
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  const limits = req.body?.limits;
+  const features = req.body?.features;
+  const isActive = req.body?.isActive;
+  const validPlanIds = new Set(SUBSCRIPTION_PLANS.map((plan) => plan.id));
+  const allowedLimits = new Map(SUBSCRIPTION_PLANS[0].limits.map((limit) => [limit.key, limit.unit]));
+  const allowedFeatures = new Set(SUBSCRIPTION_PLANS.flatMap((plan) => plan.features));
+  if (!validPlanIds.has(planId as any) || name.length < 2 || name.length > 120 || description.length > 1000 || reason.length < 5 || reason.length > 1000 || !Array.isArray(limits) || !Array.isArray(features) || typeof isActive !== 'boolean') return res.status(400).json({ error: 'Provide a plan name, description, limits, features, active state, and change reason.' });
+  const limitKeys = limits.map((limit: any) => limit?.key);
+  if (limits.length !== allowedLimits.size || new Set(limitKeys).size !== allowedLimits.size || limits.some((limit: any) => !allowedLimits.has(limit?.key) || limit?.unit !== allowedLimits.get(limit.key) || (limit.value !== null && (!Number.isInteger(limit.value) || limit.value < 0 || limit.value > 10000000)))) return res.status(400).json({ error: 'Each supported plan limit must have a valid non-negative integer value or be unset.' });
+  if (features.some((feature: any) => typeof feature !== 'string' || !allowedFeatures.has(feature as PlanFeature)) || new Set(features).size !== features.length) return res.status(400).json({ error: 'The selected plan features are invalid or duplicated.' });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [currentRows]: any = await connection.execute('SELECT * FROM PlatformSubscriptionPlans WHERE id = ? LIMIT 1 FOR UPDATE', [planId]);
+    if (!currentRows.length) { await connection.rollback(); return res.status(404).json({ error: 'Subscription plan not found.' }); }
+    if (!isActive) {
+      const [[usage]]: any = await connection.execute('SELECT COUNT(*) AS assignedCount FROM WorkspaceSubscriptions WHERE planId = ?', [planId]);
+      if (Number(usage.assignedCount) > 0) { await connection.rollback(); return res.status(409).json({ error: 'A plan assigned to colleges cannot be deactivated. Move those subscriptions to another plan first.' }); }
+    }
+    const before = { name: currentRows[0].name, description: currentRows[0].description, limits: parseStoredJson<PlanLimit[]>(currentRows[0].limitsJson, []), features: parseStoredJson<PlanFeature[]>(currentRows[0].featuresJson, []), isActive: Boolean(currentRows[0].isActive) };
+    const after = { name, description, limits, features, isActive };
+    await connection.execute('UPDATE PlatformSubscriptionPlans SET name = ?, description = ?, limitsJson = ?, featuresJson = ?, isActive = ?, updatedByPlatformAdminId = ? WHERE id = ?', [name, description, JSON.stringify(limits), JSON.stringify(features), isActive ? 1 : 0, admin.platformAdminId, planId]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, beforeJson, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'subscription.plan_updated', 'subscription_plan', planId, reason, JSON.stringify(before), JSON.stringify(after)]);
+    await connection.commit();
+    res.json({ success: true, id: planId, ...after });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Subscription plan update failed:', error);
+    res.status(500).json({ error: 'Could not save this subscription plan.' });
+  } finally { connection.release(); }
+});
+
+app.put('/api/platform/workspaces/:id/subscription', requirePlatformAdmin, async (req, res) => {
+  const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
+  const { planId, status, currentPeriodStart, currentPeriodEnd, internalNote } = req.body || {};
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  const validStatuses = ['not_configured', 'trialing', 'active', 'past_due', 'canceled', 'suspended'];
+  const validDate = (value: unknown) => value === null || value === '' || (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value);
+  if (typeof planId !== 'string' || !validStatuses.includes(status) || !validDate(currentPeriodStart) || !validDate(currentPeriodEnd) || (currentPeriodStart && currentPeriodEnd && currentPeriodEnd < currentPeriodStart) || typeof internalNote !== 'string' || internalNote.length > 5000 || reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Choose a plan, valid subscription status and date range, and enter an internal note and change reason.' });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [planRows]: any = await connection.execute('SELECT id, isActive FROM PlatformSubscriptionPlans WHERE id = ? LIMIT 1', [planId]);
+    if (!planRows.length || !Number(planRows[0].isActive)) { await connection.rollback(); return res.status(400).json({ error: 'Select an active plan from the catalog.' }); }
+    const [workspaceRows]: any = await connection.execute('SELECT id, name FROM Workspaces WHERE id = ? LIMIT 1 FOR UPDATE', [req.params.id]);
+    if (!workspaceRows.length) { await connection.rollback(); return res.status(404).json({ error: 'College workspace not found.' }); }
+    await connection.execute('INSERT IGNORE INTO WorkspaceSubscriptions (workspaceId) VALUES (?)', [req.params.id]);
+    const [currentRows]: any = await connection.execute('SELECT planId, status, currentPeriodStart, currentPeriodEnd, internalNote FROM WorkspaceSubscriptions WHERE workspaceId = ? LIMIT 1 FOR UPDATE', [req.params.id]);
+    const before = { planId: currentRows[0].planId, status: currentRows[0].status, currentPeriodStart: currentRows[0].currentPeriodStart, currentPeriodEnd: currentRows[0].currentPeriodEnd, internalNote: currentRows[0].internalNote || '' };
+    const startAt = currentPeriodStart ? `${currentPeriodStart} 00:00:00` : null;
+    const endAt = currentPeriodEnd ? `${currentPeriodEnd} 23:59:59` : null;
+    const after = { planId, status, currentPeriodStart: currentPeriodStart || null, currentPeriodEnd: currentPeriodEnd || null, internalNote: internalNote.trim() };
+    await connection.execute('UPDATE WorkspaceSubscriptions SET planId = ?, status = ?, currentPeriodStart = ?, currentPeriodEnd = ?, internalNote = ? WHERE workspaceId = ?', [planId, status, startAt, endAt, after.internalNote || null, req.params.id]);
+    await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, beforeJson, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'workspace.subscription_updated', 'workspace', req.params.id, reason, JSON.stringify(before), JSON.stringify(after)]);
+    await connection.commit();
+    res.json({ success: true, workspaceName: workspaceRows[0].name, ...after });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Workspace subscription update failed:', error);
+    res.status(500).json({ error: 'Could not update this college subscription.' });
+  } finally { connection.release(); }
+});
+
 app.get('/api/platform/workspaces', requirePlatformAdmin, async (req, res) => {
   const query = String(req.query.q || '').trim().slice(0, 100);
   const status = String(req.query.status || 'all');
@@ -1221,10 +1396,10 @@ app.get('/api/platform/workspaces', requirePlatformAdmin, async (req, res) => {
     const [rows]: any = await pool.execute(
       `SELECT w.id, w.name, w.slug, w.lifecycleStatus, w.statusReason,
               DATE_FORMAT(w.createdAt, '%Y-%m-%d %H:%i:%s') AS createdAt,
-              COALESCE(s.planId, 'pilot') AS planId, COALESCE(s.status, 'not_configured') AS subscriptionStatus,
+              COALESCE(s.planId, 'pilot') AS planId, COALESCE(p.name, 'Pilot') AS planName, COALESCE(s.status, 'not_configured') AS subscriptionStatus,
               (SELECT COUNT(*) FROM WorkspaceMemberships m WHERE m.workspaceId = w.id AND m.role = 'student' AND m.status = 'active') AS activeStudents,
               (SELECT COUNT(*) FROM WorkspaceMemberships m WHERE m.workspaceId = w.id AND m.role IN ('college_admin','trainer','panelist') AND m.status = 'active') AS staffCount
-       FROM Workspaces w LEFT JOIN WorkspaceSubscriptions s ON s.workspaceId = w.id
+       FROM Workspaces w LEFT JOIN WorkspaceSubscriptions s ON s.workspaceId = w.id LEFT JOIN PlatformSubscriptionPlans p ON p.id = s.planId
        ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
        ORDER BY FIELD(w.lifecycleStatus, 'onboarding', 'active', 'suspended', 'archived'), w.createdAt DESC LIMIT 500`,
       params,
@@ -1242,7 +1417,7 @@ app.get('/api/platform/workspaces/:id', requirePlatformAdmin, async (req, res) =
       `SELECT w.id, w.name, w.slug, w.lifecycleStatus, w.statusReason,
               DATE_FORMAT(w.createdAt, '%Y-%m-%d %H:%i:%s') AS createdAt,
               DATE_FORMAT(w.lifecycleUpdatedAt, '%Y-%m-%d %H:%i:%s') AS lifecycleUpdatedAt,
-              s.planId, s.status AS subscriptionStatus, s.billingInterval, s.currency,
+              s.planId, s.status AS subscriptionStatus, s.billingInterval, s.currency, s.internalNote,
               DATE_FORMAT(s.currentPeriodStart, '%Y-%m-%d') AS currentPeriodStart,
               DATE_FORMAT(s.currentPeriodEnd, '%Y-%m-%d') AS currentPeriodEnd,
               DATE_FORMAT(s.trialEndsAt, '%Y-%m-%d') AS trialEndsAt, s.cancelAtPeriodEnd,
@@ -1253,6 +1428,7 @@ app.get('/api/platform/workspaces/:id', requirePlatformAdmin, async (req, res) =
       [req.params.id],
     );
     if (!rows.length) return res.status(404).json({ error: 'College workspace not found.' });
+    const workspacePlan = await getPlanDefinitionFromDb(pool, rows[0].planId || 'pilot');
     const [contacts]: any = await pool.execute(
       `SELECT u.name, u.email, m.status, u.isActive AS accountActive FROM WorkspaceMemberships m JOIN Users u ON u.id = m.userId
        WHERE m.workspaceId = ? AND m.role = 'college_admin' ORDER BY (m.status = 'active') DESC, u.name ASC`,
@@ -1286,6 +1462,8 @@ app.get('/api/platform/workspaces/:id', requirePlatformAdmin, async (req, res) =
     );
     res.json({
       ...rows[0],
+      planName: workspacePlan.name,
+      planDescription: workspacePlan.description,
       collegeAdmins: contacts,
       adminInvitations: invitationsWithStatus,
       initialAdminInvitation,
@@ -1598,7 +1776,7 @@ app.get('/api/workspace/subscription', requireRole('college_admin'), async (req,
       'SELECT creditsUsed FROM WorkspaceAiUsage WHERE workspaceId = ? AND periodStart = ? LIMIT 1',
       [auth.workspaceId, usagePeriodStart],
     );
-    const plan = SUBSCRIPTION_PLANS.find((item) => item.id === subscription.planId) || SUBSCRIPTION_PLANS[0];
+    const plan = await getPlanDefinitionFromDb(pool, subscription.planId || 'pilot');
     const result: WorkspaceSubscriptionOverview = {
       subscription: {
         id: auth.workspaceId,
@@ -2610,7 +2788,7 @@ async function reconcileCurriculumDayCompletion(workspaceId: string, studentUser
      FROM WorkspaceCurriculumMaterials m
      LEFT JOIN WorkspaceCurriculumMaterialProgress p
        ON p.workspaceId = m.workspaceId AND p.materialId = m.id AND p.studentUserId = ?
-     WHERE m.workspaceId = ? AND m.dayNumber = ? AND m.isRequired = 1`,
+     WHERE m.workspaceId = ? AND m.dayNumber = ? AND m.isRequired = 1 AND m.isArchived = 0`,
     [studentUserId, workspaceId, dayNumber],
   );
   const [[passedAttempt]]: any = await pool.execute(
@@ -2640,7 +2818,7 @@ async function reconcileAllCurriculumProgress(workspaceId: string, studentUserId
      FROM WorkspaceCurriculumMaterials m
      LEFT JOIN WorkspaceCurriculumMaterialProgress p
        ON p.workspaceId = m.workspaceId AND p.materialId = m.id AND p.studentUserId = ?
-     WHERE m.workspaceId = ? AND m.isRequired = 1
+     WHERE m.workspaceId = ? AND m.isRequired = 1 AND m.isArchived = 0
      GROUP BY m.dayNumber`,
     [studentUserId, workspaceId],
   );
@@ -2792,7 +2970,7 @@ app.get('/api/curriculum/materials', requireRole('college_admin', 'trainer', 'st
        FROM WorkspaceCurriculumMaterials m
        LEFT JOIN WorkspaceCurriculumMaterialProgress p
          ON p.workspaceId = m.workspaceId AND p.materialId = m.id AND p.studentUserId = ?
-       WHERE m.workspaceId = ? AND m.dayNumber = ?
+       WHERE m.workspaceId = ? AND m.dayNumber = ? AND m.isArchived = 0
        ORDER BY m.position, m.createdAt, m.title`,
       [auth.role === 'student' ? auth.userId : null, auth.workspaceId, dayNumber],
     );

@@ -1,6 +1,6 @@
 import React, { FormEvent, useEffect, useState } from 'react';
 import { Activity, AlertTriangle, ArrowLeft, ArrowUpRight, Building2, CheckCircle2, Copy, CreditCard, LoaderCircle, LogOut, Plus, Search, Shield, ShieldCheck, Users } from 'lucide-react';
-import { acceptCollegeAdminInvite, acceptPlatformAdminInvite, applySharedContent, completePlatformMfaReset, createPlatformAdminInvitation, createPlatformWorkspace, createSharedContentDraft, getCollegeAdminInvite, getPlatformAdminInvite, getPlatformAdmins, getPlatformAuditEvents, getPlatformMfaReset, getPlatformOverview, getPlatformSession, getPlatformWorkspace, getPlatformWorkspaces, getSharedContentVersion, getSharedContentVersions, inviteWorkspaceAdmin, platformLogin, platformLogout, publishSharedContent, requestPlatformMfaReset, resendWorkspaceAdminInvitation, revokeWorkspaceAdminInvitation, saveSharedContentDraft, setPlatformAdminStatus, setPlatformWorkspaceStatus, SharedMaterialDraft, SharedContentVersion } from '../services/platformAdmin';
+import { acceptCollegeAdminInvite, acceptPlatformAdminInvite, applySharedContent, completePlatformMfaReset, createPlatformAdminInvitation, createPlatformWorkspace, createSharedContentDraft, getCollegeAdminInvite, getPlatformAdminInvite, getPlatformAdmins, getPlatformAuditEvents, getPlatformMfaReset, getPlatformOverview, getPlatformPlans, getPlatformSession, getPlatformWorkspace, getPlatformWorkspaces, getSharedContentApplications, getSharedContentRollout, getSharedContentVersion, getSharedContentVersions, inviteWorkspaceAdmin, platformLogin, platformLogout, publishSharedContent, requestPlatformMfaReset, resendWorkspaceAdminInvitation, revokeWorkspaceAdminInvitation, rollbackSharedContent, savePlatformPlan, saveSharedContentDraft, setPlatformAdminStatus, setPlatformWorkspaceStatus, updatePlatformWorkspaceSubscription, SharedContentApplication, SharedContentRollout, SharedMaterialDraft, SharedContentVersion, PlatformPlan } from '../services/platformAdmin';
 import { PlatformWorkspace } from '../services/platformAdmin';
 
 type PlatformUser = { id: string; name: string; email: string };
@@ -16,7 +16,7 @@ export const PlatformAdminApp: React.FC = () => {
   const mfaResetToken = query.get('mfaReset') || '';
   const [user, setUser] = useState<PlatformUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [activePage, setActivePage] = useState<'overview' | 'workspaces' | 'admins' | 'audit' | 'content'>('overview');
+  const [activePage, setActivePage] = useState<'overview' | 'workspaces' | 'plans' | 'admins' | 'audit' | 'content'>('overview');
   const [overview, setOverview] = useState<any>(null);
   const [workspaces, setWorkspaces] = useState<PlatformWorkspace[]>([]);
   const [admins, setAdmins] = useState<Array<{ id: string; name: string; email: string; isActive: boolean; lastLoginAt: string | null; createdAt: string }>>([]);
@@ -94,6 +94,14 @@ export const PlatformAdminApp: React.FC = () => {
     catch (err) { setError(err instanceof Error ? err.message : 'Could not update the workspace.'); }
   };
 
+  const changeWorkspaceSubscription = async (payload: { planId: PlatformPlan['id']; status: string; currentPeriodStart: string | null; currentPeriodEnd: string | null; internalNote: string; reason: string }) => {
+    if (!workspaceDetail) return;
+    await updatePlatformWorkspaceSubscription(workspaceDetail.id, payload);
+    setWorkspaceDetail(await getPlatformWorkspace(workspaceDetail.id));
+    await loadConsole();
+    setNotice(`Manual subscription updated for ${workspaceDetail.name}.`);
+  };
+
   const createWorkspace = async (data: { name: string; adminName: string; adminEmail: string }) => {
     setBusy(true); setError(''); setNotice(''); setInviteLink('');
     try { const created = await createPlatformWorkspace(data); setInviteLink(created.inviteUrl); setNotice('Workspace created in onboarding. Copy the first administrator invitation link and send it through your approved channel.'); await loadConsole(); }
@@ -158,16 +166,16 @@ export const PlatformAdminApp: React.FC = () => {
   return <div className="min-h-screen bg-slate-100 text-slate-900">
     <header className="flex items-center justify-between border-b border-slate-800 bg-slate-950 px-5 py-3 text-white"><div className="flex items-center gap-3"><div className="rounded-xl bg-indigo-600 p-2"><Shield size={19}/></div><div><p className="text-sm font-extrabold">TalentEdge Platform</p><p className="text-[10px] text-slate-400">Cross-college operations · all actions audited</p></div></div><div className="flex items-center gap-3"><span className="hidden text-right sm:block"><span className="block text-xs font-bold">{user.name}</span><span className="block text-[10px] text-slate-400">{user.email}</span></span><button onClick={() => void signOut()} className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold hover:bg-slate-800"><LogOut size={14}/>Sign out</button></div></header>
     <div className="mx-auto grid max-w-7xl gap-6 p-4 sm:p-7 lg:grid-cols-[210px_1fr]">
-      <aside className="flex gap-2 overflow-x-auto lg:block lg:space-y-1">{([['overview','Overview'],['workspaces','Colleges'],['content','Shared content'],['admins','Platform admins'],['audit','Audit log']] as const).map(([key,label]) => <button key={key} onClick={() => { setActivePage(key); setWorkspaceDetail(null); setNotice(''); }} className={`whitespace-nowrap rounded-xl px-4 py-2.5 text-left text-sm font-semibold lg:w-full ${activePage === key ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 hover:bg-indigo-50'}`}>{label}</button>)}</aside>
+      <aside className="flex gap-2 overflow-x-auto lg:block lg:space-y-1">{([['overview','Overview'],['workspaces','Colleges'],['plans','Plans & subscriptions'],['content','Shared content'],['admins','Platform admins'],['audit','Audit log']] as const).map(([key,label]) => <button key={key} onClick={() => { setActivePage(key); setWorkspaceDetail(null); setNotice(''); }} className={`whitespace-nowrap rounded-xl px-4 py-2.5 text-left text-sm font-semibold lg:w-full ${activePage === key ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 hover:bg-indigo-50'}`}>{label}</button>)}</aside>
       <main className="min-w-0 space-y-5">
         {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}<button className="ml-3 font-bold" onClick={() => setError('')}>Dismiss</button></p>}
         {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
         {inviteLink && <div className="flex flex-col gap-2 rounded-xl border border-indigo-200 bg-white p-4 sm:flex-row sm:items-center"><input readOnly value={inviteLink} className={`${inputClass} min-w-0 flex-1 text-xs`}/><button onClick={() => navigator.clipboard.writeText(inviteLink).then(() => setNotice('Invitation link copied.'))} className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold text-white"><Copy size={14}/>Copy invite link</button></div>}
-        {workspaceDetail ? <WorkspaceDetail detail={workspaceDetail} onBack={() => setWorkspaceDetail(null)} onStatus={changeWorkspaceStatus} onInviteAdmin={inviteWorkspaceAdminLink} onResendInvite={resendWorkspaceInvite} onRevokeInvite={revokeWorkspaceInvite}/> : activePage === 'overview' ? <>
+        {workspaceDetail ? <WorkspaceDetail detail={workspaceDetail} onBack={() => setWorkspaceDetail(null)} onStatus={changeWorkspaceStatus} onInviteAdmin={inviteWorkspaceAdminLink} onResendInvite={resendWorkspaceInvite} onRevokeInvite={revokeWorkspaceInvite} onSubscriptionSave={changeWorkspaceSubscription}/> : activePage === 'plans' ? <PlanCatalogPage/> : activePage === 'overview' ? <>
           <div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Platform overview</p><h1 className="mt-1 text-2xl font-extrabold">College workspaces</h1><p className="mt-1 text-sm text-slate-500">Operational overview across all colleges. Student-level records are not exposed here.</p></div>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[['Total colleges',overview?.totalWorkspaces],['Active',overview?.activeWorkspaces],['Onboarding',overview?.onboardingWorkspaces],['Suspended',overview?.suspendedWorkspaces]].map(([label,value]) => <Metric key={String(label)} label={String(label)} value={value ?? '…'} icon={<Building2 size={18}/>}/>)}<Metric label="Archived" value={overview?.archivedWorkspaces ?? '…'} icon={<Building2 size={18}/>}/><Metric label="Created in last 30 days" value={overview?.createdLast30Days ?? '…'} icon={<Activity size={18}/>}/><Metric label="Active students across colleges" value={overview?.activeStudents ?? '…'} icon={<Users size={18}/>}/></div>
           <OperationalAlerts alerts={overview?.alerts || []} summary={overview?.alertSummary} onOpen={openWorkspace}/>
-          <section className="rounded-2xl bg-white p-5 shadow-sm"><h2 className="font-bold">Subscription states</h2><div className="mt-3 flex flex-wrap gap-2">{overview?.subscriptions?.map((item: any) => <span key={item.status} className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700">{item.status.replaceAll('_',' ')} · {item.count}</span>)}</div><p className="mt-3 text-xs text-slate-500">Plans and payment processing remain read-only until commercial terms and a billing provider are approved.</p></section>
+          <section className="rounded-2xl bg-white p-5 shadow-sm"><h2 className="font-bold">Subscription states</h2><div className="mt-3 flex flex-wrap gap-2">{overview?.subscriptions?.map((item: any) => <span key={item.status} className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700">{item.status.replaceAll('_',' ')} · {item.count}</span>)}</div><p className="mt-3 text-xs text-slate-500">Plan limits and features are configurable. College subscriptions are managed manually; pricing, invoicing, and payment processing are not enabled.</p></section>
           <WorkspaceDirectory rows={workspaces.slice(0, 8)} query={workspaceQuery} setQuery={setWorkspaceQuery} status={workspaceStatus} setStatus={setWorkspaceStatus} onOpen={openWorkspace} onCreate={createWorkspace} busy={busy}/>
         </> : activePage === 'workspaces' ? <WorkspaceDirectory rows={workspaces} query={workspaceQuery} setQuery={setWorkspaceQuery} status={workspaceStatus} setStatus={setWorkspaceStatus} onOpen={openWorkspace} onCreate={createWorkspace} busy={busy}/> : activePage === 'admins' ? <section className="space-y-5 rounded-2xl bg-white p-5 shadow-sm"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Access control</p><h1 className="mt-1 text-2xl font-extrabold">Platform administrators</h1><p className="mt-1 text-sm text-slate-500">Invite-only access. Accounts require a password and an authenticator code.</p></div><form onSubmit={(event) => void inviteAdmin(event)} className="flex flex-col gap-2 sm:flex-row"><input required type="email" value={platformAdminEmail} onChange={(event) => setPlatformAdminEmail(event.target.value)} placeholder="New platform admin email" className={`${inputClass} flex-1`}/><button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white"><Plus size={16}/>Create invite</button></form><AdminTable rows={admins} onToggle={toggleAdmin} onResetMfa={resetAdminMfa}/></section> : activePage === 'audit' ? <PlatformAuditLog/> : <SharedContentLibrary/>}
       </main>
@@ -181,7 +189,7 @@ const WorkspaceDirectory: React.FC<{ rows: PlatformWorkspace[]; query: string; s
   return <section className="space-y-4 rounded-2xl bg-white p-5 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Directory</p><h2 className="mt-1 text-xl font-extrabold">College workspaces</h2></div><button onClick={() => setShowCreate((value) => !value)} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-3 py-2 text-xs font-bold text-white"><Plus size={15}/>Provision college</button></div>
     {showCreate && <form onSubmit={(event) => { event.preventDefault(); onCreate({ name, adminName, adminEmail }); setShowCreate(false); }} className="grid gap-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-4 sm:grid-cols-2"><label className="text-xs font-bold">College name<input required minLength={2} value={name} onChange={(event) => setName(event.target.value)} className={`${inputClass} mt-1`}/></label><label className="text-xs font-bold">Initial admin name<input required minLength={2} value={adminName} onChange={(event) => setAdminName(event.target.value)} className={`${inputClass} mt-1`}/></label><label className="text-xs font-bold sm:col-span-2">Initial admin email<input required type="email" value={adminEmail} onChange={(event) => setAdminEmail(event.target.value)} className={`${inputClass} mt-1`}/></label><p className="text-xs text-slate-500 sm:col-span-2">Creates an onboarding workspace with the Pilot planning tier. The first-admin invitation link is shown after creation; deliver it out of band.</p><button disabled={busy} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">Create onboarding workspace</button></form>}
     <div className="grid gap-2 sm:grid-cols-[1fr_190px]"><label className="relative"><Search size={15} className="absolute left-3 top-3 text-slate-400"/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search colleges or slugs" className={`${inputClass} pl-9`}/></label><select value={status} onChange={(event) => setStatus(event.target.value)} className={inputClass}><option value="all">All workspace states</option>{Object.entries(statusLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>
-    <div className="overflow-x-auto"><table className="w-full min-w-[800px] text-left text-sm"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{['College','State','Plan','Subscription','Students','Staff','Created'].map((item) => <th key={item} className="px-3 py-3">{item}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.id} onClick={() => onOpen(row.id)} className="cursor-pointer hover:bg-indigo-50/50"><td className="px-3 py-3"><strong className="block">{row.name}</strong><span className="text-[10px] text-slate-500">{row.slug}</span></td><td className="px-3 py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${statusStyles[row.lifecycleStatus]}`}>{statusLabels[row.lifecycleStatus]}</span></td><td className="px-3 py-3">{planLabels[row.planId] || row.planId}</td><td className="px-3 py-3">{row.subscriptionStatus?.replaceAll('_',' ')}</td><td className="px-3 py-3">{row.activeStudents}</td><td className="px-3 py-3">{row.staffCount}</td><td className="px-3 py-3">{row.createdAt}</td></tr>)}{rows.length === 0 && <tr><td colSpan={7} className="p-8 text-center text-slate-500">No workspaces match this filter.</td></tr>}</tbody></table></div>
+    <div className="overflow-x-auto"><table className="w-full min-w-[800px] text-left text-sm"><thead className="bg-slate-50 text-[10px] uppercase text-slate-500"><tr>{['College','State','Plan','Subscription','Students','Staff','Created'].map((item) => <th key={item} className="px-3 py-3">{item}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{rows.map((row) => <tr key={row.id} onClick={() => onOpen(row.id)} className="cursor-pointer hover:bg-indigo-50/50"><td className="px-3 py-3"><strong className="block">{row.name}</strong><span className="text-[10px] text-slate-500">{row.slug}</span></td><td className="px-3 py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${statusStyles[row.lifecycleStatus]}`}>{statusLabels[row.lifecycleStatus]}</span></td><td className="px-3 py-3">{row.planName || planLabels[row.planId] || row.planId}</td><td className="px-3 py-3">{row.subscriptionStatus?.replaceAll('_',' ')}</td><td className="px-3 py-3">{row.activeStudents}</td><td className="px-3 py-3">{row.staffCount}</td><td className="px-3 py-3">{row.createdAt}</td></tr>)}{rows.length === 0 && <tr><td colSpan={7} className="p-8 text-center text-slate-500">No workspaces match this filter.</td></tr>}</tbody></table></div>
   </section>;
 };
 
@@ -194,7 +202,81 @@ const OperationalAlerts: React.FC<{ alerts: Array<{ id: string; type: string; se
   </section>;
 };
 
-const WorkspaceDetail: React.FC<{ detail: any; onBack: () => void; onStatus: (status: string) => void; onInviteAdmin: (id: string, email: string) => void; onResendInvite: (workspaceId: string, invitationId: string, email: string) => void; onRevokeInvite: (workspaceId: string, invitationId: string, email: string) => void }> = ({ detail, onBack, onStatus, onInviteAdmin, onResendInvite, onRevokeInvite }) => {
+const planFeatureLabels: Record<string, string> = {
+  college_workspace: 'College workspace', student_and_trainer_access: 'Student and trainer access', batches: 'Batches', curriculum: 'Curriculum',
+  assessments: 'Assessments', interview_feedback: 'Interview feedback', basic_analytics: 'Basic analytics', standard_exports: 'Standard exports',
+  ai_insights: 'AI insights', college_analytics: 'College analytics', advanced_analytics: 'Advanced analytics', custom_branding: 'Custom branding', priority_support: 'Priority support',
+};
+const planLimitLabels: Record<string, string> = { active_students: 'Active students', trainer_seats: 'Trainer seats', active_batches: 'Active batches', ai_credits_per_period: 'AI credits per period' };
+
+const PlanCatalogPage: React.FC = () => {
+  const [plans, setPlans] = useState<PlatformPlan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const reload = async () => setPlans(await getPlatformPlans());
+  useEffect(() => { getPlatformPlans().then(setPlans).catch((err) => setError(err.message)).finally(() => setLoading(false)); }, []);
+  const updatePlan = (id: PlatformPlan['id'], update: Partial<PlatformPlan>) => setPlans((current) => current.map((plan) => plan.id === id ? { ...plan, ...update } : plan));
+  const save = async (plan: PlatformPlan) => {
+    const reason = window.prompt(`Reason for changing the ${plan.name} plan configuration (required):`) || '';
+    if (reason.trim().length < 5) { setError('Enter a change reason of at least five characters.'); return; }
+    setSavingId(plan.id); setError(''); setNotice('');
+    try { await savePlatformPlan(plan.id, { name: plan.name, description: plan.description, limits: plan.limits, features: plan.features, isActive: plan.isActive, reason }); await reload(); setNotice(`${plan.name} plan saved. New limits apply to workspaces assigned to this plan.`); }
+    catch (err) { setError(err instanceof Error ? err.message : 'Could not save this plan.'); }
+    finally { setSavingId(''); }
+  };
+  const toggleFeature = (plan: PlatformPlan, feature: string, enabled: boolean) => updatePlan(plan.id, { features: enabled ? [...plan.features, feature] : plan.features.filter((item) => item !== feature) });
+  return <section className="space-y-5 rounded-2xl bg-white p-5 shadow-sm">
+    <header><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Commercial setup</p><h1 className="mt-1 text-2xl font-extrabold">Plans & subscriptions</h1><p className="mt-1 text-sm text-slate-500">Configure Pilot, Campus, and Campus Plus entitlements. Prices and payment processing are intentionally unavailable.</p></header>
+    {error && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}{notice && <p role="status" className="rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}
+    {loading ? <p className="text-sm text-slate-500">Loading plan catalog…</p> : <div className="grid gap-4 xl:grid-cols-3">{plans.map((plan) => <article key={plan.id} className="space-y-4 rounded-xl border border-slate-200 p-4">
+      <div className="flex items-start justify-between gap-2"><div><span className="text-[10px] font-bold uppercase tracking-widest text-indigo-600">{plan.id.replaceAll('_',' ')}</span><h2 className="mt-1 text-lg font-extrabold">{plan.name}</h2></div><label className="flex items-center gap-2 text-[10px] font-bold"><input type="checkbox" checked={plan.isActive} onChange={(event) => updatePlan(plan.id, { isActive: event.target.checked })}/>Available</label></div>
+      <label className="block text-xs font-semibold">Display name<input maxLength={120} value={plan.name} onChange={(event) => updatePlan(plan.id, { name: event.target.value })} className={`${inputClass} mt-1`}/></label>
+      <label className="block text-xs font-semibold">Description<textarea maxLength={1000} rows={2} value={plan.description} onChange={(event) => updatePlan(plan.id, { description: event.target.value })} className={`${inputClass} mt-1`}/></label>
+      <div><h3 className="text-xs font-bold">Capacity limits</h3><div className="mt-2 space-y-2">{plan.limits.map((limit) => <label key={limit.key} className="flex items-center justify-between gap-2 text-[11px] text-slate-600">{planLimitLabels[limit.key]}<input type="number" min={0} value={limit.value ?? ''} placeholder="Unset" onChange={(event) => updatePlan(plan.id, { limits: plan.limits.map((item) => item.key === limit.key ? { ...item, value: event.target.value === '' ? null : Number(event.target.value) } : item) })} className="w-28 rounded-lg border border-slate-200 px-2 py-1.5 text-right text-xs"/></label>)}</div></div>
+      <div><h3 className="text-xs font-bold">Included features</h3><div className="mt-2 grid grid-cols-2 gap-2">{Object.entries(planFeatureLabels).map(([feature, label]) => <label key={feature} className="flex items-start gap-2 text-[10px] leading-4 text-slate-600"><input type="checkbox" checked={plan.features.includes(feature)} onChange={(event) => toggleFeature(plan, feature, event.target.checked)} className="mt-0.5"/>{label}</label>)}</div></div>
+      <p className="text-[10px] text-slate-400">Last updated: {plan.updatedAt} · Every change is audited. No price is stored or displayed.</p>
+      <button disabled={savingId === plan.id} onClick={() => void save(plan)} className="w-full rounded-lg bg-indigo-600 px-3 py-2.5 text-xs font-bold text-white disabled:opacity-50">{savingId === plan.id ? 'Saving…' : 'Save plan configuration'}</button>
+    </article>)}</div>}
+    <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">This first billing phase is manual. Assign a plan and subscription term from a college’s detail page; payment, invoice, tax, and renewal automation are not connected.</p>
+  </section>;
+};
+
+const SubscriptionAdminForm: React.FC<{ detail: any; onSave: (payload: { planId: PlatformPlan['id']; status: string; currentPeriodStart: string | null; currentPeriodEnd: string | null; internalNote: string; reason: string }) => Promise<void> }> = ({ detail, onSave }) => {
+  const [plans, setPlans] = useState<PlatformPlan[]>([]);
+  const [planId, setPlanId] = useState<PlatformPlan['id']>(detail.planId || 'pilot');
+  const [status, setStatus] = useState(detail.subscriptionStatus || 'not_configured');
+  const [start, setStart] = useState(detail.currentPeriodStart || '');
+  const [end, setEnd] = useState(detail.currentPeriodEnd || '');
+  const [note, setNote] = useState(detail.internalNote || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => { getPlatformPlans().then(setPlans).catch((err) => setError(err.message)); }, []);
+  useEffect(() => { setPlanId(detail.planId || 'pilot'); setStatus(detail.subscriptionStatus || 'not_configured'); setStart(detail.currentPeriodStart || ''); setEnd(detail.currentPeriodEnd || ''); setNote(detail.internalNote || ''); }, [detail.id, detail.planId, detail.subscriptionStatus, detail.currentPeriodStart, detail.currentPeriodEnd, detail.internalNote]);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const reason = window.prompt(`Reason for updating ${detail.name}'s subscription (required):`) || '';
+    if (reason.trim().length < 5) { setError('Enter a change reason of at least five characters.'); return; }
+    setSaving(true); setError('');
+    try { await onSave({ planId, status, currentPeriodStart: start || null, currentPeriodEnd: end || null, internalNote: note, reason }); }
+    catch (err) { setError(err instanceof Error ? err.message : 'Could not save subscription.'); }
+    finally { setSaving(false); }
+  };
+  return <section className="rounded-xl border border-indigo-100 bg-indigo-50/30 p-4"><div><h2 className="font-bold">Manual subscription administration</h2><p className="mt-1 text-xs text-slate-500">Set the college plan, subscription state, term dates, and a platform-only internal note. College administrators cannot see the note.</p></div>
+    {error && <p role="alert" className="mt-3 rounded-lg bg-rose-50 p-2 text-xs text-rose-700">{error}</p>}
+    <form onSubmit={(event) => void submit(event)} className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <label className="text-xs font-semibold">Plan<select value={planId} onChange={(event) => setPlanId(event.target.value as PlatformPlan['id'])} className={`${inputClass} mt-1`}>{plans.map((plan) => <option key={plan.id} value={plan.id} disabled={!plan.isActive && plan.id !== detail.planId}>{plan.name}{plan.isActive ? '' : ' · inactive'}</option>)}</select></label>
+      <label className="text-xs font-semibold">Subscription status<select value={status} onChange={(event) => setStatus(event.target.value)} className={`${inputClass} mt-1`}>{[['not_configured','Not configured'],['trialing','Trialing'],['active','Active'],['past_due','Past due'],['canceled','Canceled'],['suspended','Suspended']].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <label className="text-xs font-semibold">Term start<input type="date" value={start} onChange={(event) => setStart(event.target.value)} className={`${inputClass} mt-1`}/></label>
+      <label className="text-xs font-semibold">Term end<input type="date" min={start || undefined} value={end} onChange={(event) => setEnd(event.target.value)} className={`${inputClass} mt-1`}/></label>
+      <label className="text-xs font-semibold sm:col-span-2">Internal note<textarea maxLength={5000} rows={2} value={note} onChange={(event) => setNote(event.target.value)} className={`${inputClass} mt-1`} placeholder="Internal context for the TalentEdge team"/></label>
+      <button disabled={saving || !plans.length} className="self-end rounded-lg bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">{saving ? 'Saving…' : 'Save subscription'}</button>
+    </form>
+  </section>;
+};
+
+const WorkspaceDetail: React.FC<{ detail: any; onBack: () => void; onStatus: (status: string) => void; onInviteAdmin: (id: string, email: string) => void; onResendInvite: (workspaceId: string, invitationId: string, email: string) => void; onRevokeInvite: (workspaceId: string, invitationId: string, email: string) => void; onSubscriptionSave: (payload: { planId: PlatformPlan['id']; status: string; currentPeriodStart: string | null; currentPeriodEnd: string | null; internalNote: string; reason: string }) => Promise<void> }> = ({ detail, onBack, onStatus, onInviteAdmin, onResendInvite, onRevokeInvite, onSubscriptionSave }) => {
   const [adminEmail, setAdminEmail] = useState('');
   const readiness = detail.onboardingReadiness;
   const firstInvite = detail.initialAdminInvitation;
@@ -206,7 +288,9 @@ const WorkspaceDetail: React.FC<{ detail: any; onBack: () => void; onStatus: (st
   return <section className="space-y-5 rounded-2xl bg-white p-5 shadow-sm">
     <button onClick={onBack} className="inline-flex items-center gap-1 text-xs font-bold text-indigo-700"><ArrowLeft size={14}/>All colleges</button>
     <header className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600">Workspace details</p><h1 className="mt-1 text-2xl font-extrabold">{detail.name}</h1><p className="mt-1 text-xs text-slate-500">{detail.slug} · Created {detail.createdAt}</p></div><span className={`rounded-full px-3 py-1.5 text-xs font-bold ${statusStyles[detail.lifecycleStatus]}`}>{statusLabels[detail.lifecycleStatus]}</span></header>
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Active students" value={detail.activeStudents} icon={<Users size={17}/>}/><Metric label="Staff seats" value={detail.staffCount} icon={<Shield size={17}/>}/><Metric label="Active batches" value={detail.activeBatches} icon={<Building2 size={17}/>}/><Metric label="Plan / subscription" value={`${planLabels[detail.planId] || detail.planId} · ${detail.subscriptionStatus || 'unconfigured'}`} icon={<CreditCard size={17}/>}/></div>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Active students" value={detail.activeStudents} icon={<Users size={17}/>}/><Metric label="Staff seats" value={detail.staffCount} icon={<Shield size={17}/>}/><Metric label="Active batches" value={detail.activeBatches} icon={<Building2 size={17}/>}/><Metric label="Plan / subscription" value={`${detail.planName || planLabels[detail.planId] || detail.planId} · ${detail.subscriptionStatus || 'unconfigured'}`} icon={<CreditCard size={17}/>}/></div>
+
+    <SubscriptionAdminForm detail={detail} onSave={onSubscriptionSave}/>
 
     <section className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4">
       <h2 className="font-bold">Onboarding readiness</h2>
@@ -294,16 +378,24 @@ const newSharedMaterialForm = (): SharedMaterialForm => ({ dayNumber: 1, title: 
 
 const SharedContentLibrary: React.FC = () => {
   const [versions, setVersions] = useState<SharedContentVersion[]>([]);
+  const [applications, setApplications] = useState<SharedContentApplication[]>([]);
+  const [rollout, setRollout] = useState<SharedContentRollout | null>(null);
   const [workspaces, setWorkspaces] = useState<PlatformWorkspace[]>([]);
   const [selectedVersionId, setSelectedVersionId] = useState('');
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof getSharedContentVersion>> | null>(null);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState('');
+  const [historyWorkspaceId, setHistoryWorkspaceId] = useState('');
+  const [historyDateFrom, setHistoryDateFrom] = useState('');
+  const [historyDateTo, setHistoryDateTo] = useState('');
   const [materialForm, setMaterialForm] = useState<SharedMaterialForm>(newSharedMaterialForm());
   const [editingMaterialId, setEditingMaterialId] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+
+  const refreshApplications = async () => setApplications(await getSharedContentApplications({ workspaceId: historyWorkspaceId, dateFrom: historyDateFrom, dateTo: historyDateTo }));
+  const refreshRollout = async () => setRollout(await getSharedContentRollout());
 
   const refreshVersions = async (selectId?: string) => {
     const next = await getSharedContentVersions();
@@ -314,11 +406,13 @@ const SharedContentLibrary: React.FC = () => {
 
   useEffect(() => {
     let current = true;
-    Promise.all([getSharedContentVersions(), getPlatformWorkspaces({ q: '', status: 'all' })])
-      .then(([versionRows, workspaceRows]) => {
+    Promise.all([getSharedContentVersions(), getPlatformWorkspaces({ q: '', status: 'all' }), getSharedContentApplications(), getSharedContentRollout()])
+      .then(([versionRows, workspaceRows, applicationRows, rolloutData]) => {
         if (!current) return;
         setVersions(versionRows);
         setWorkspaces(workspaceRows);
+        setApplications(applicationRows);
+        setRollout(rolloutData);
         if (versionRows.length) setSelectedVersionId(versionRows[0].id);
       })
       .catch((err) => { if (current) setError(err instanceof Error ? err.message : 'Could not load the shared content library.'); })
@@ -369,6 +463,7 @@ const SharedContentLibrary: React.FC = () => {
       await saveDraft();
       await publishSharedContent(detail.id, reason);
       await refreshVersions(detail.id);
+      await refreshRollout();
       setDetail(await getSharedContentVersion(detail.id));
       setNotice(`Version ${detail.versionNumber} published. Apply it to each college that should receive this release.`);
     } catch (err) { setError(err instanceof Error ? err.message : 'Could not publish this content version.'); }
@@ -385,8 +480,25 @@ const SharedContentLibrary: React.FC = () => {
     try {
       const result = await applySharedContent(detail.id, selectedWorkspaceId, reason);
       await refreshVersions(detail.id);
+      await refreshApplications();
+      await refreshRollout();
       setNotice(`Applied v${result.versionNumber} to ${result.workspaceName}: ${result.materialAdded} materials added, ${result.materialUpdated} shared materials updated, ${result.materialPreserved} customized materials preserved; ${result.assessmentAdded} assessments added, ${result.assessmentUpdated} shared assessments updated, ${result.assessmentPreserved} customized assessments preserved.`);
     } catch (err) { setError(err instanceof Error ? err.message : 'Could not apply this content version.'); }
+    finally { setBusy(false); }
+  };
+
+  const rollback = async (application: SharedContentApplication) => {
+    const reason = window.prompt(`Reason for rolling ${application.workspaceName} back to version ${application.versionNumber} (required):`) || '';
+    if (reason.trim().length < 5) { setError('Enter a rollback reason of at least five characters.'); return; }
+    if (!window.confirm(`Reapply published version ${application.versionNumber} to ${application.workspaceName}? This is recorded as a new history entry. College-customized content and student progress will be preserved.`)) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const result = await rollbackSharedContent(application.versionId, application.workspaceId, reason);
+      await refreshApplications();
+      await refreshRollout();
+      await refreshVersions();
+      setNotice(`Rolled ${result.workspaceName} back to shared content v${result.versionNumber}. Customized content and student progress were preserved.`);
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not roll back shared content.'); }
     finally { setBusy(false); }
   };
 
@@ -423,6 +535,7 @@ const SharedContentLibrary: React.FC = () => {
 
   const editable = detail?.status === 'draft';
   const applicableWorkspaces = workspaces.filter((workspace) => ['onboarding', 'active'].includes(workspace.lifecycleStatus));
+  const rolloutStatus = (status: string) => status === 'current' ? ['Current', 'bg-emerald-100 text-emerald-800'] : status === 'behind' ? ['Behind latest', 'bg-amber-100 text-amber-900'] : status === 'not_applied' ? ['Not applied', 'bg-rose-100 text-rose-800'] : status === 'excluded' ? ['Excluded', 'bg-slate-100 text-slate-600'] : ['No release', 'bg-slate-100 text-slate-600'];
 
   if (loading && !versions.length) return <FullScreenMessage>Loading shared content library…</FullScreenMessage>;
 
@@ -449,6 +562,21 @@ const SharedContentLibrary: React.FC = () => {
         <p className="text-[10px] text-slate-400">Applying a release never deletes college materials or assessments. Shared items customized by a college are preserved on later updates; student material progress and assessment submissions remain linked to their original records.</p>
       </>}</div>
     </div>}
+    <section className="rounded-xl border border-slate-200 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-bold">Rollout status by college</h2><p className="mt-1 text-xs text-slate-500">Compared with the latest published release{rollout?.latestPublishedVersionNumber ? ` v${rollout.latestPublishedVersionNumber}` : ''}. Suspended and archived colleges are excluded from coverage counts.</p></div><button disabled={busy} onClick={() => void refreshRollout()} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-bold disabled:opacity-50">Refresh rollout</button></div>
+      {rollout ? <><div className="mt-4 grid gap-3 sm:grid-cols-4"><div className="rounded-lg bg-slate-50 p-3"><span className="text-[10px] font-semibold uppercase text-slate-500">Eligible colleges</span><strong className="mt-1 block text-xl">{rollout.totalEligible}</strong></div><div className="rounded-lg bg-emerald-50 p-3"><span className="text-[10px] font-semibold uppercase text-emerald-700">Current</span><strong className="mt-1 block text-xl text-emerald-800">{rollout.current}</strong></div><div className="rounded-lg bg-amber-50 p-3"><span className="text-[10px] font-semibold uppercase text-amber-700">Behind latest</span><strong className="mt-1 block text-xl text-amber-900">{rollout.behind}</strong></div><div className="rounded-lg bg-rose-50 p-3"><span className="text-[10px] font-semibold uppercase text-rose-700">Not applied</span><strong className="mt-1 block text-xl text-rose-800">{rollout.notApplied}</strong></div></div>
+        <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="text-[10px] uppercase text-slate-500"><tr><th className="py-2 pr-3">College</th><th className="py-2 pr-3">Lifecycle</th><th className="py-2 pr-3">Currently applied</th><th className="py-2 pr-3">Latest published</th><th className="py-2 pr-3">Applied at</th><th className="py-2">Rollout</th></tr></thead><tbody className="divide-y divide-slate-100">{rollout.colleges.map((college) => { const [label, style] = rolloutStatus(college.status); return <tr key={college.workspaceId}><td className="py-3 pr-3 font-semibold text-slate-800">{college.workspaceName}</td><td className="py-3 pr-3 capitalize text-slate-500">{college.lifecycleStatus}</td><td className="py-3 pr-3 text-slate-700">{college.appliedVersionNumber ? `v${college.appliedVersionNumber} · ${college.appliedVersionTitle}` : '—'}</td><td className="py-3 pr-3 text-slate-700">{college.latestPublishedVersionNumber ? `v${college.latestPublishedVersionNumber} · ${college.latestPublishedTitle}` : 'No published release'}</td><td className="py-3 pr-3 text-slate-500">{college.appliedAt ? `${college.appliedAt} UTC` : '—'}</td><td className="py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${style}`}>{label}</span></td></tr>; })}{rollout.colleges.length === 0 && <tr><td colSpan={6} className="py-4 text-center text-slate-500">No college workspaces found.</td></tr>}</tbody></table></div>
+      </> : <p className="mt-4 text-xs text-slate-500">Loading rollout status…</p>}
+    </section>
+    <section className="rounded-xl border border-slate-200 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-bold">College application history</h2><p className="mt-1 text-xs text-slate-500">Every publish application and rollback is recorded with its actor, reason, timestamp, and change summary.</p></div></div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-[1.4fr_1fr_1fr_auto]"><label className="text-[10px] font-semibold text-slate-500">College<select value={historyWorkspaceId} onChange={(event) => setHistoryWorkspaceId(event.target.value)} className={`${inputClass} mt-1 text-xs`}><option value="">All colleges</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label><label className="text-[10px] font-semibold text-slate-500">From date<input type="date" value={historyDateFrom} onChange={(event) => setHistoryDateFrom(event.target.value)} className={`${inputClass} mt-1 text-xs`}/></label><label className="text-[10px] font-semibold text-slate-500">To date<input type="date" value={historyDateTo} onChange={(event) => setHistoryDateTo(event.target.value)} className={`${inputClass} mt-1 text-xs`}/></label><button disabled={busy} onClick={() => void refreshApplications().catch((err) => setError(err.message))} className="self-end rounded-lg border border-slate-200 px-3 py-2.5 text-xs font-bold disabled:opacity-50">Apply filters</button></div>
+      {applications.length === 0 ? <p className="mt-4 rounded-lg bg-slate-50 p-3 text-xs text-slate-500">No shared content has been applied yet.</p> : <div className="mt-4 space-y-3">{applications.map((application) => {
+        const latestForWorkspace = applications.find((item) => item.workspaceId === application.workspaceId);
+        const canRollback = versions.some((version) => version.id === application.versionId && version.status === 'published') && latestForWorkspace?.id !== application.id && application.versionNumber < (latestForWorkspace?.versionNumber || 0);
+        return <article key={application.id} className="rounded-lg border border-slate-100 p-3"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="text-sm font-bold">{application.workspaceName} · v{application.versionNumber}: {application.versionTitle}</p><p className="mt-1 text-[11px] text-slate-500">Applied by {application.appliedBy} · {application.appliedAt} UTC</p><p className="mt-2 text-xs text-slate-700"><span className="font-semibold">Reason:</span> {application.reason}</p><p className="mt-1 text-[10px] text-slate-500">Materials: {application.result.materialAdded || 0} added, {application.result.materialUpdated || 0} updated, {application.result.materialPreserved || 0} preserved, {application.result.materialArchived || 0} archived · Assessments: {application.result.assessmentAdded || 0} added, {application.result.assessmentUpdated || 0} updated, {application.result.assessmentPreserved || 0} preserved, {application.result.assessmentArchived || 0} archived</p></div>{canRollback && <button disabled={busy} onClick={() => void rollback(application)} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-900 disabled:opacity-50">Roll back to v{application.versionNumber}</button>}</div></article>;
+      })}</div>}
+    </section>
   </section>;
 };
 

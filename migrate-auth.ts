@@ -2,6 +2,7 @@ import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 import { randomUUID } from 'node:crypto';
 import { ASSESSMENTS_CATALOG } from './src/data/assessmentData';
+import { SUBSCRIPTION_PLANS } from './src/types/subscriptions';
 
 dotenv.config();
 
@@ -153,15 +154,30 @@ async function migrate() {
       workspaceId VARCHAR(191) NOT NULL,
       versionId VARCHAR(191) NOT NULL,
       appliedByPlatformAdminId VARCHAR(191) NOT NULL,
+      reason VARCHAR(1000) NOT NULL DEFAULT '',
       resultJson JSON NULL,
-      appliedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uq_shared_content_workspace_version (workspaceId, versionId),
+      appliedAt DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+      KEY idx_shared_content_apply_workspace (workspaceId, appliedAt),
       KEY idx_shared_content_apply_time (appliedAt),
       CONSTRAINT fk_shared_content_apply_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
       CONSTRAINT fk_shared_content_apply_version FOREIGN KEY (versionId) REFERENCES PlatformSharedContentVersions(id) ON DELETE CASCADE,
       CONSTRAINT fk_shared_content_apply_admin FOREIGN KEY (appliedByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE RESTRICT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+  await pool.query('ALTER TABLE PlatformSharedContentApplications MODIFY COLUMN appliedAt DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)');
+  await addColumn('PlatformSharedContentApplications', 'reason', "VARCHAR(1000) NOT NULL DEFAULT ''");
+  const [historyIndexes]: any = await pool.query(
+    `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'PlatformSharedContentApplications'
+       AND INDEX_NAME = 'idx_shared_content_apply_workspace' LIMIT 1`,
+  );
+  if (!historyIndexes.length) await pool.query('ALTER TABLE PlatformSharedContentApplications ADD KEY idx_shared_content_apply_workspace (workspaceId, appliedAt)');
+  const [applicationIndexes]: any = await pool.query(
+    `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'PlatformSharedContentApplications'
+       AND INDEX_NAME = 'uq_shared_content_workspace_version' LIMIT 1`,
+  );
+  if (applicationIndexes.length) await pool.query('ALTER TABLE PlatformSharedContentApplications DROP INDEX uq_shared_content_workspace_version');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS WorkspaceMemberships (
       id VARCHAR(191) PRIMARY KEY,
@@ -200,6 +216,7 @@ async function migrate() {
       contentFormat ENUM('markdown', 'html') NOT NULL DEFAULT 'markdown',
       position INT UNSIGNED NOT NULL DEFAULT 0,
       isRequired TINYINT(1) NOT NULL DEFAULT 1,
+      isArchived TINYINT(1) NOT NULL DEFAULT 0,
       createdByUserId VARCHAR(191) NULL,
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -354,9 +371,22 @@ async function migrate() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS PlatformSubscriptionPlans (
+      id VARCHAR(64) PRIMARY KEY,
+      name VARCHAR(120) NOT NULL,
+      description VARCHAR(1000) NOT NULL DEFAULT '',
+      limitsJson JSON NOT NULL,
+      featuresJson JSON NOT NULL,
+      isActive TINYINT(1) NOT NULL DEFAULT 1,
+      updatedByPlatformAdminId VARCHAR(191) NULL,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT fk_subscription_plan_updater FOREIGN KEY (updatedByPlatformAdminId) REFERENCES PlatformAdminAccounts(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS WorkspaceSubscriptions (
       workspaceId VARCHAR(191) PRIMARY KEY,
-      planId ENUM('pilot', 'campus', 'campus_plus') NOT NULL DEFAULT 'pilot',
+      planId VARCHAR(64) NOT NULL DEFAULT 'pilot',
       status ENUM('not_configured', 'trialing', 'active', 'past_due', 'canceled', 'suspended') NOT NULL DEFAULT 'not_configured',
       billingInterval ENUM('monthly', 'annual') NOT NULL DEFAULT 'monthly',
       currency CHAR(3) NOT NULL DEFAULT 'INR',
@@ -364,10 +394,20 @@ async function migrate() {
       currentPeriodEnd DATETIME NULL,
       trialEndsAt DATETIME NULL,
       cancelAtPeriodEnd TINYINT(1) NOT NULL DEFAULT 0,
+      internalNote TEXT NULL,
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       CONSTRAINT fk_workspace_subscription_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+  await pool.query("ALTER TABLE WorkspaceSubscriptions MODIFY COLUMN planId VARCHAR(64) NOT NULL DEFAULT 'pilot'");
+  await addColumn('WorkspaceSubscriptions', 'internalNote', 'TEXT NULL');
+  for (const plan of SUBSCRIPTION_PLANS) {
+    await pool.execute(
+      `INSERT IGNORE INTO PlatformSubscriptionPlans (id, name, description, limitsJson, featuresJson, isActive)
+       VALUES (?, ?, ?, ?, ?, 1)`,
+      [plan.id, plan.name, plan.description, JSON.stringify(plan.limits), JSON.stringify(plan.features)],
+    );
+  }
   await pool.query(`
     CREATE TABLE IF NOT EXISTS WorkspaceAiUsage (
       workspaceId VARCHAR(191) NOT NULL,
@@ -526,6 +566,7 @@ async function migrate() {
   await addColumn('WorkspaceCurriculumMaterials', 'sourceContentId', 'VARCHAR(191) NULL');
   await addColumn('WorkspaceCurriculumMaterials', 'sourceVersionId', 'VARCHAR(191) NULL');
   await addColumn('WorkspaceCurriculumMaterials', 'isCustomized', 'TINYINT(1) NOT NULL DEFAULT 0');
+  await addColumn('WorkspaceCurriculumMaterials', 'isArchived', 'TINYINT(1) NOT NULL DEFAULT 0');
   await addColumn('Assessments', 'workspaceId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'createdByUserId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'batchId', 'VARCHAR(191) NULL');
