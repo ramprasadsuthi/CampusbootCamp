@@ -1,4 +1,5 @@
 import React from 'react';
+import { explainReadiness } from '../utils/readinessScore';
 import {
   User,
   Mail,
@@ -98,6 +99,7 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
   onDownloadReport,
   onOpenAiInsights,
 }) => {
+  const readinessExplanation = student.readinessExplanation || explainReadiness(student.metrics as any);
   const circularGauges = [
     { label: 'Coding & DSA', value: student.metrics.coding, color: '#4F46E5', icon: Code2 },
     { label: 'Aptitude & Math', value: student.metrics.aptitude, color: '#2563EB', icon: Brain },
@@ -174,7 +176,7 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
                 {student.placementReadinessScore}%
               </span>
               <span className="text-[11px] block opacity-90 font-medium mt-0.5">
-                Top 5% Cohort Percentile
+                Weighted skill indicator · {readinessExplanation.modelVersion}
               </span>
             </div>
 
@@ -199,6 +201,12 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
           </div>
         </div>
       </div>
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-baseline justify-between gap-2"><div><h2 className="text-sm font-bold text-slate-900 dark:text-white">How this readiness score is calculated</h2><p className="mt-1 text-[11px] text-slate-500">Model {readinessExplanation.modelVersion}: weighted average of current competency scores.</p></div><span className="text-lg font-extrabold text-indigo-600">{readinessExplanation.score}%</span></div>
+        <div className="mt-4 grid gap-x-5 gap-y-2 sm:grid-cols-2">{readinessExplanation.factors.map((factor: any) => <div key={factor.key} className="flex items-center justify-between gap-3 text-xs"><span className="text-slate-600 dark:text-slate-300">{factor.label} <span className="text-slate-400">({factor.weight}%)</span></span><span className="font-semibold text-slate-800 dark:text-slate-100">{factor.score === null ? 'No data' : `${factor.score}% · +${factor.contribution.toFixed(1)}`}</span></div>)}</div>
+        <p className="mt-3 border-t border-slate-100 pt-3 text-[11px] text-slate-500 dark:border-slate-800">This is a training indicator, not a hiring decision or placement probability. Missing scores are excluded and the remaining weights are proportionally rescaled.</p>
+      </section>
 
       {/* 9 Beautiful Circular Progress Gauges */}
       <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs space-y-4">
@@ -233,10 +241,10 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
           <div>
             <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <Building className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-              <span>Target IT Companies Eligibility & Drive Clearance Probability</span>
+              <span>Company drive context · illustrative only</span>
             </h2>
             <p className="text-xs text-slate-500">
-              Calculated against institutional drive cutoffs and previous batch historical clearance benchmarks
+              These stored fit labels are demo references, not employer-verified eligibility or hiring probabilities.
             </p>
           </div>
         </div>
@@ -271,20 +279,7 @@ export const StudentProfileView: React.FC<StudentProfileViewProps> = ({
                 </p>
               </div>
 
-              <div>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <span className="text-slate-500">Drive Clearance Odds:</span>
-                  <span className="font-extrabold text-emerald-600 dark:text-emerald-400">
-                    {co.currentProbability}%
-                  </span>
-                </div>
-                <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2 overflow-hidden">
-                  <div
-                    className="bg-emerald-500 h-full rounded-full transition-all duration-500"
-                    style={{ width: `${co.currentProbability}%` }}
-                  />
-                </div>
-              </div>
+              <p className="text-[10px] text-slate-500">Demo status only · no employer outcome model is available.</p>
             </div>
           ))}
         </div>

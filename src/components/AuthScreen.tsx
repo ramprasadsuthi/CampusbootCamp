@@ -1,6 +1,6 @@
 import React, { FormEvent, useEffect, useState } from 'react';
 import { GraduationCap, LockKeyhole, LoaderCircle, ShieldCheck } from 'lucide-react';
-import { acceptInvitation, bootstrapCollege, getBootstrapStatus, registerWorkspace, resetPassword, signIn } from '../services/auth';
+import { acceptInvitation, bootstrapCollege, getBootstrapStatus, registerWorkspace, requestPasswordReset, resetPassword, signIn } from '../services/auth';
 
 interface AuthScreenProps {
   onAuthenticated: () => void;
@@ -12,7 +12,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
   const [bootstrapEnabled, setBootstrapEnabled] = useState(false);
   const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const [workspaceName, setWorkspaceName] = useState('');
-  const [mode, setMode] = useState<'login' | 'bootstrap' | 'register' | 'invite' | 'reset'>(resetToken ? 'reset' : inviteToken ? 'invite' : 'login');
+  const [mode, setMode] = useState<'login' | 'bootstrap' | 'register' | 'invite' | 'reset' | 'forgot'>(resetToken ? 'reset' : inviteToken ? 'invite' : 'login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -51,6 +51,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
         setPassword('');
         setNotice('Password updated. Sign in with your new password.');
         return;
+      } else if (mode === 'forgot') {
+        const result = await requestPasswordReset(email);
+        setPassword(''); setNotice(result.message); return;
       } else {
         await signIn(email, password);
       }
@@ -73,7 +76,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
           </div>
           <p className="text-xs font-bold uppercase tracking-[0.2em] text-indigo-300">TalentEdge</p>
           <h1 className="mt-2 text-2xl font-bold">
-            {mode === 'bootstrap' || mode === 'register' ? 'Set up your college' : mode === 'invite' ? 'Join your workspace' : mode === 'reset' ? 'Reset your password' : 'Welcome back'}
+            {mode === 'bootstrap' || mode === 'register' ? 'Set up your college' : mode === 'invite' ? 'Join your workspace' : mode === 'reset' || mode === 'forgot' ? 'Reset your password' : 'Welcome back'}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-300">
             {mode === 'bootstrap' || mode === 'register'
@@ -82,6 +85,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
               ? 'Create your account to accept the college workspace invitation.'
               : mode === 'reset'
               ? 'Choose a new password. This link can be used once and expires after one hour.'
+              : mode === 'forgot'
+              ? 'Enter your account email and we will send a password reset link if an active account matches.'
               : 'Sign in with your college workspace account to continue.'}
           </p>
         </div>
@@ -94,17 +99,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
             </>
           )}
           {(mode === 'bootstrap' || mode === 'register' || mode === 'invite') && <label className="block space-y-1.5"><span className="text-xs font-semibold text-slate-600">Full name</span><input required minLength={2} autoComplete="name" className={inputClass} value={name} onChange={(e) => setName(e.target.value)} /></label>}
-          {(mode === 'login' || mode === 'bootstrap' || mode === 'register') && <label className="block space-y-1.5"><span className="text-xs font-semibold text-slate-600">Email address</span><input required type="email" autoComplete="email" className={inputClass} value={email} onChange={(e) => setEmail(e.target.value)} /></label>}
-          <label className="block space-y-1.5"><span className="text-xs font-semibold text-slate-600">Password</span><input required type="password" minLength={12} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} className={inputClass} value={password} onChange={(e) => setPassword(e.target.value)} /><span className="block text-[11px] text-slate-400">Use at least 12 characters.</span></label>
+          {(mode === 'login' || mode === 'bootstrap' || mode === 'register' || mode === 'forgot') && <label className="block space-y-1.5"><span className="text-xs font-semibold text-slate-600">Email address</span><input required type="email" autoComplete="email" className={inputClass} value={email} onChange={(e) => setEmail(e.target.value)} /></label>}
+          {mode !== 'forgot' && <label className="block space-y-1.5"><span className="text-xs font-semibold text-slate-600">Password</span><input required type="password" minLength={12} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} className={inputClass} value={password} onChange={(e) => setPassword(e.target.value)} /><span className="block text-[11px] text-slate-400">Use at least 12 characters.</span></label>}
           {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-700">{notice}</p>}
           {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-sm text-rose-700">{error}</p>}
           <button disabled={busy} className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-600/20 transition hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-70">
             {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : mode === 'login' ? <LockKeyhole className="h-4 w-4" /> : <ShieldCheck className="h-4 w-4" />}
-            {busy ? 'Please wait…' : mode === 'bootstrap' || mode === 'register' ? 'Create college administrator' : mode === 'invite' ? 'Accept invitation' : mode === 'reset' ? 'Update password' : 'Sign in'}
+            {busy ? 'Please wait…' : mode === 'bootstrap' || mode === 'register' ? 'Create college administrator' : mode === 'invite' ? 'Accept invitation' : mode === 'reset' ? 'Update password' : mode === 'forgot' ? 'Send reset link' : 'Sign in'}
           </button>
           {mode === 'login' && bootstrapEnabled && <button type="button" onClick={() => setMode('bootstrap')} className="w-full py-1 text-xs font-semibold text-indigo-700 hover:text-indigo-900">Set up the first college administrator</button>}
+          {mode === 'login' && <button type="button" onClick={() => { setError(''); setNotice(''); setMode('forgot'); }} className="w-full py-1 text-xs font-semibold text-indigo-700 hover:text-indigo-900">Forgot password?</button>}
           {mode === 'login' && registrationEnabled && <button type="button" onClick={() => { setWorkspaceName(''); setMode('register'); }} className="w-full py-1 text-xs font-semibold text-indigo-700 hover:text-indigo-900">Create a college workspace</button>}
-          {(mode === 'bootstrap' || mode === 'register') && <button type="button" onClick={() => setMode('login')} className="w-full py-1 text-xs font-semibold text-slate-500 hover:text-slate-800">Back to sign in</button>}
+          {(mode === 'bootstrap' || mode === 'register' || mode === 'forgot') && <button type="button" onClick={() => { setError(''); setNotice(''); setMode('login'); }} className="w-full py-1 text-xs font-semibold text-slate-500 hover:text-slate-800">Back to sign in</button>}
         </form>
         <div className="border-t border-slate-100 px-8 py-4 text-center text-[11px] text-slate-400">Your college workspace keeps its users and learning data separated.<a href="/platform-admin" className="mt-2 block font-semibold text-indigo-600 hover:text-indigo-800">TalentEdge platform administration</a></div>
       </section>

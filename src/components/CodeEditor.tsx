@@ -20,14 +20,18 @@ import { CodingProblem } from '../types';
 
 interface CodeEditorProps {
   initialProblem?: CodingProblem;
-  onSolve?: (score: number) => void;
+  onSolve?: (score: number, code: string, language: string) => void;
   standalone?: boolean;
+  assessmentId?: string;
+  questionIndex?: number;
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({
   initialProblem = SAMPLE_CODING_PROBLEMS.twoSum,
   onSolve,
   standalone = true,
+  assessmentId,
+  questionIndex,
 }) => {
   const [selectedProblemKey, setSelectedProblemKey] = useState<string>('twoSum');
   const problem = standalone ? SAMPLE_CODING_PROBLEMS[selectedProblemKey] || initialProblem : initialProblem;
@@ -70,12 +74,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     setExecutionError('');
     setActiveTab('terminal');
     try {
-      const visibleCases = problem.testCases.filter((tc) => !tc.hidden);
       const res = await executeCodeOnServer({
         code,
         language,
         input: useCustomInput ? customInput : undefined,
-        testCases: visibleCases,
+        problemId: standalone ? selectedProblemKey : initialProblem.id,
+        assessmentId,
+        questionIndex,
       });
       setExecutionResult(res);
     } catch (error) {
@@ -94,11 +99,13 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       const res = await executeCodeOnServer({
         code,
         language,
-        testCases: problem.testCases,
+        problemId: standalone ? selectedProblemKey : initialProblem.id,
+        assessmentId,
+        questionIndex,
       });
       setExecutionResult(res);
       if (onSolve) {
-        onSolve(res.score);
+        onSolve(res.score, code, language);
       }
     } catch (error) {
       setExecutionError(error instanceof Error ? error.message : 'Submission failed.');
@@ -365,7 +372,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                       </div>
                     ))}
                   <p className="text-[11px] text-slate-400 pt-1 font-sans">
-                    + {problem.testCases.filter((tc) => tc.hidden).length} Hidden Stress Test Cases verified upon Submit.
+                    + {problem.testCases.filter((tc) => tc.hidden).length} Hidden test cases are checked when you submit the assessment.
                   </p>
                 </div>
               ) : (

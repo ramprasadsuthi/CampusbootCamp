@@ -5,13 +5,14 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import mysql from 'mysql2/promise';
-import { ASSESSMENTS_CATALOG } from './src/data/assessmentData';
+import { ASSESSMENTS_CATALOG, SAMPLE_CODING_PROBLEMS } from './src/data/assessmentData';
 import { CURRICULUM_40_DAYS } from './src/data/curriculumData';
 import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettings } from './src/types/auth';
-import { SUBSCRIPTION_PLANS, type PlanFeature, type PlanLimit, type PlanLimitKey, type SubscriptionPlanDefinition, type WorkspaceSubscriptionOverview } from './src/types/subscriptions';
-import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { hasPlatformPermission, hasWorkspacePermission, SUBSCRIPTION_PLANS, type PlanFeature, type PlanLimit, type PlanLimitKey, type SubscriptionPlanDefinition, type WorkspacePermission, type WorkspaceRoleId, type WorkspaceSubscriptionOverview } from './src/types/subscriptions';
+import { createHash, createHmac, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { decryptTotpSecret, encryptTotpSecret, generateTotpSecret, verifyTotp } from './src/utils/platformSecurity';
+import { explainReadiness, READINESS_MODEL_VERSION } from './src/utils/readinessScore';
 
 dotenv.config();
 
@@ -23,6 +24,7 @@ const SESSION_COOKIE = 'talentedge_session';
 const SESSION_DAYS = 14;
 const PLATFORM_SESSION_COOKIE = 'talentedge_platform_session';
 const PLATFORM_SESSION_HOURS = 8;
+const ASSESSMENT_PASS_PERCENT = 70;
 const loginFailures = new Map<string, { count: number; expiresAt: number }>();
 
 interface AuthContext {
@@ -33,14 +35,182 @@ interface AuthContext {
   avatar: string;
   workspaceId: string;
   workspaceName: string;
-  role: 'college_admin' | 'trainer' | 'student' | 'panelist';
+  role: WorkspaceRoleId;
 }
 
 type AuthenticatedRequest = Request & { auth?: AuthContext };
 interface PlatformAuthContext { sessionId: string; platformAdminId: string; name: string; email: string; }
 type PlatformAuthenticatedRequest = Request & { platformAuth?: PlatformAuthContext };
 
-app.use(express.json({ limit: '400kb' }));
+app.use(express.json({ limit: '400kb', verify: (req: any, _res, buffer) => {
+  if (req.originalUrl === '/api/billing/razorpay/webhook') req.rawBody = Buffer.from(buffer);
+} }));
+
+// Correlate requests in server logs without logging request bodies, query strings, or credentials.
+app.use((req, res, next) => {
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+  res.setHeader('X-Request-Id', requestId);
+  res.on('finish', () => {
+    // Vite serves many static assets during local development; keep operational logs focused on API traffic.
+    if (!req.path.startsWith('/api/') || req.path === '/api/health' || req.path === '/api/ready') return;
+    console.log(JSON.stringify({ level: res.statusCode >= 500 ? 'error' : 'info', event: 'http_request', requestId,
+      method: req.method, route: (req as any).route?.path || 'unmatched', status: res.statusCode, durationMs: Date.now() - startedAt }));
+  });
+  next();
+});
+
+const JUDGE0_LANGUAGE_PATTERNS: Record<string, RegExp> = {
+  c: /^C\s*\(/i,
+  cpp: /^C\+\+\s*\(/i,
+  java: /^Java\s*\(/i,
+  javascript: /^JavaScript\s*\(/i,
+  python: /^Python\s*\(/i,
+};
+let judge0LanguagesCache: { fetchedAt: number; ids: Record<string, number> } | null = null;
+async function getJudge0LanguageId(language: string, endpoint: string, headers: Record<string, string>) {
+  const key = language.toLowerCase();
+  const pattern = JUDGE0_LANGUAGE_PATTERNS[key];
+  if (!pattern) throw new Error('This programming language is not enabled.');
+  if (!judge0LanguagesCache || Date.now() - judge0LanguagesCache.fetchedAt > 10 * 60 * 1000) {
+    const response = await fetch(`${endpoint}/languages`, { headers, signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error(`Could not retrieve Judge0 runtimes (HTTP ${response.status}).`);
+    const languages: any = await response.json();
+    if (!Array.isArray(languages)) throw new Error('Judge0 returned an invalid runtime list.');
+    const ids: Record<string, number> = {};
+    for (const [name, matcher] of Object.entries(JUDGE0_LANGUAGE_PATTERNS)) {
+      const runtime = languages.find((item: any) => typeof item.name === 'string' && matcher.test(item.name));
+      if (runtime && Number.isInteger(runtime.id)) ids[name] = runtime.id;
+    }
+    judge0LanguagesCache = { fetchedAt: Date.now(), ids };
+  }
+  const id = judge0LanguagesCache.ids[key];
+  if (!id) throw new Error(`Judge0 does not have a supported ${language} runtime installed.`);
+  return id;
+}
+function prepareJudgeProgram(sourceCode: string, language: string, problemData: any, testCases: Array<{ input: string; expected?: string; hidden?: boolean }>) {
+  const problemId = problemData?.id;
+  const functionName = problemId === 'code-1' ? 'twoSum' : problemId === 'code-2' ? 'lengthOfLongestSubstring' : problemId === 'code-3' ? 'subarraySum' : null;
+  if (!functionName) return { sourceCode, testCases };
+  const languageKey = language.toLowerCase();
+  const normalize = (testCase: any) => {
+    let args: any[];
+    if (problemId === 'code-1') {
+      const match = testCase.input.match(/(\[[^\]]*\])\s*,\s*target\s*=\s*(-?\d+)/i);
+      if (!match) throw new Error('Bundled Two Sum cases must use the format [numbers], target = value.');
+      args = [JSON.parse(match[1]), Number(match[2])];
+    } else if (problemId === 'code-3') {
+      const match = testCase.input.match(/(?:nums\s*=\s*)?(\[[^\]]*\])\s*,\s*k\s*=\s*(-?\d+)/i);
+      if (!match) throw new Error('Bundled Subarray Sum cases must use the format nums = [numbers], k = value.');
+      args = [JSON.parse(match[1]), Number(match[2])];
+    } else {
+      const match = testCase.input.match(/s\s*=\s*("(?:[^"\\]|\\.)*")/i);
+      if (!match) throw new Error('Bundled substring cases must use the format s = "text".');
+      args = [JSON.parse(match[1])];
+    }
+    const input = problemId === 'code-2' ? args[0]
+      : languageKey === 'python' || languageKey === 'javascript' ? JSON.stringify(args)
+        : `${args[0].length} ${args[0].join(' ')} ${args[1]}`;
+    return { ...testCase, input };
+  };
+  const normalizedCases = testCases.map(normalize);
+  let harness = '';
+  if (languageKey === 'python') {
+    const invocation = problemId === 'code-1' ? 'twoSum(*json.loads(line))'
+      : problemId === 'code-2' ? 'lengthOfLongestSubstring(line.rstrip("\\n"))' : 'subarraySum(*json.loads(line))';
+    harness = `\nimport json, sys\nfor line in sys.stdin:\n    print(json.dumps(${invocation}))\n`;
+  } else if (languageKey === 'javascript') {
+    const invocation = problemId === 'code-1' ? 'twoSum(...JSON.parse(line))'
+      : problemId === 'code-2' ? 'lengthOfLongestSubstring(line.replace(/\\n$/, ""))' : 'subarraySum(...JSON.parse(line))';
+    harness = `\nconst fs = require('fs');\nfor (const line of fs.readFileSync(0, 'utf8').split(/\\r?\\n/).filter(Boolean)) console.log(JSON.stringify(${invocation}));\n`;
+  } else if (languageKey === 'cpp' || languageKey === 'java' || languageKey === 'c') {
+    if (problemId === 'code-2' && languageKey === 'cpp') harness = `\n#include <iostream>\nint main(){ std::string s; std::getline(std::cin, s); std::cout << Solution().lengthOfLongestSubstring(s) << std::endl; }\n`;
+    else if (problemId === 'code-2' && languageKey === 'java') harness = `\nclass Main { public static void main(String[] args) throws Exception { java.util.Scanner sc = new java.util.Scanner(System.in); String s = sc.hasNextLine() ? sc.nextLine() : ""; System.out.println(new Solution().lengthOfLongestSubstring(s)); } }\n`;
+    else if (problemId === 'code-2' && languageKey === 'c') harness = `\nint main(){ char s[200000]; if(!fgets(s,sizeof(s),stdin)) s[0]='\\0'; s[strcspn(s,"\\n")]=0; printf("%d\\n", lengthOfLongestSubstring(s)); }\n`;
+    else if (languageKey === 'cpp') {
+      const call = problemId === 'code-1' ? 'Solution().twoSum(nums, value)' : 'Solution().subarraySum(nums, value)';
+      harness = `\n#include <iostream>\nint main(){ int n, value; std::cin >> n; std::vector<int> nums(n); for(int& x:nums) std::cin >> x; std::cin >> value; auto out=${call};` +
+        (problemId === 'code-1' ? ' std::cout << "["; for(size_t i=0;i<out.size();i++){if(i)std::cout<<",";std::cout<<out[i];} std::cout<<"]\\n";' : ' std::cout << out << "\\n";') + ` }\n`;
+    } else if (languageKey === 'java') {
+      const call = problemId === 'code-1' ? 'new Solution().twoSum(nums, value)' : 'new Solution().subarraySum(nums, value)';
+      harness = `\nclass Main { public static void main(String[] args) { java.util.Scanner sc=new java.util.Scanner(System.in); int n=sc.nextInt(); int[] nums=new int[n]; for(int i=0;i<n;i++) nums[i]=sc.nextInt(); int value=sc.nextInt(); ` +
+        (problemId === 'code-1' ? `System.out.println(java.util.Arrays.toString(${call}).replace(" ", ""));` : `System.out.println(${call});`) + ` } }\n`;
+    } else {
+      const call = problemId === 'code-1' ? 'twoSum(nums,n,value,&outSize)' : 'subarraySum(nums,n,value)';
+      harness = `\nint main(){ int n,value; if(scanf("%d",&n)!=1)return 0; int* nums=(int*)malloc(n*sizeof(int)); for(int i=0;i<n;i++)scanf("%d",&nums[i]); scanf("%d",&value); ` +
+        (problemId === 'code-1' ? `int outSize=0; int* out=${call}; printf("["); for(int i=0;i<outSize;i++)printf(i?",%d":"%d",out[i]); printf("]\\n"); free(out);` : `printf("%d\\n",${call});`) + ` free(nums); }\n`;
+    }
+    if (languageKey === 'cpp') harness = harness.replace('#include <iostream>', `#include <iostream>
+#include <vector>
+using namespace std;`);
+    if (languageKey === 'c') harness = harness.replace('int main(){', `#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(){`);
+  }
+  return { sourceCode: `${sourceCode}\n${harness}`, testCases: normalizedCases };
+}
+
+async function executeOnJudge0(sourceCode: string, language: string, testCases: Array<{ input: string; expected?: string; hidden?: boolean }>, problemData?: any) {
+  const endpoint = process.env.JUDGE0_URL?.replace(/\/$/, '');
+  if (!endpoint) throw new Error('Code execution is not configured. Ask your administrator to configure Judge0 CE.');
+  const boundedLimit = (value: string | undefined, fallback: number, ceiling: number) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, ceiling) : fallback;
+  };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (process.env.JUDGE0_AUTH_TOKEN) headers['X-Auth-Token'] = process.env.JUDGE0_AUTH_TOKEN;
+  if (process.env.JUDGE0_AUTH_USER) headers['X-Auth-User'] = process.env.JUDGE0_AUTH_USER;
+  const languageId = await getJudge0LanguageId(language, endpoint, headers);
+  const preparedProgram = prepareJudgeProgram(sourceCode, language, problemData, testCases);
+  sourceCode = preparedProgram.sourceCode;
+  testCases = preparedProgram.testCases;
+  const results = [];
+  const executionDeadline = Date.now() + 30000;
+  let executionTimeMs = 0;
+  let memoryKb = 0;
+  for (const [index, testCase] of testCases.entries()) {
+    const remainingMs = executionDeadline - Date.now();
+    if (remainingMs <= 0) throw new Error('The coding test suite exceeded its 30 second execution window.');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.min(15000, remainingMs));
+    try {
+      const createdResponse = await fetch(`${endpoint}/submissions?base64_encoded=false&wait=false`, {
+        method: 'POST', headers, signal: controller.signal,
+        body: JSON.stringify({ source_code: sourceCode, language_id: languageId, stdin: testCase.input,
+          cpu_time_limit: boundedLimit(process.env.JUDGE0_CPU_LIMIT, 2, 5),
+          wall_time_limit: boundedLimit(process.env.JUDGE0_WALL_LIMIT, 5, 15),
+          memory_limit: boundedLimit(process.env.JUDGE0_MEMORY_LIMIT_KB, 128000, 256000), max_processes_and_or_threads: 20,
+          enable_network: false }),
+      });
+      if (!createdResponse.ok) throw new Error(`Judge0 returned HTTP ${createdResponse.status}.`);
+      let result: any = await createdResponse.json();
+      for (let poll = 0; (result.status?.id === 1 || result.status?.id === 2) && result.token && poll < 24; poll += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        const statusResponse = await fetch(`${endpoint}/submissions/${encodeURIComponent(result.token)}?base64_encoded=false`, { headers, signal: controller.signal });
+        if (!statusResponse.ok) throw new Error(`Judge0 returned HTTP ${statusResponse.status} while collecting results.`);
+        result = await statusResponse.json();
+      }
+      if (result.status?.id === 1 || result.status?.id === 2) throw new Error('Judge0 execution timed out while waiting for the result.');
+      const actual = String(result.stdout || '').replace(/\r\n/g, '\n').trimEnd();
+      const expected = testCase.expected === undefined ? undefined : String(testCase.expected).replace(/\r\n/g, '\n').trimEnd();
+      const comparable = (value: string) => {
+        try { return JSON.stringify(JSON.parse(value)); } catch { return value.trim(); }
+      };
+      const passed = result.status?.id === 3 && (expected === undefined || comparable(actual) === comparable(expected));
+      executionTimeMs += Math.round(Number(result.time || 0) * 1000);
+      memoryKb = Math.max(memoryKb, Number(result.memory || 0));
+      results.push({ testCaseId: index + 1, input: testCase.hidden ? undefined : testCase.input,
+        expected: testCase.hidden ? undefined : expected, actual: testCase.hidden ? undefined : actual,
+        passed, hidden: Boolean(testCase.hidden), status: result.status?.description || 'Unknown',
+        error: testCase.hidden ? undefined : (result.compile_output || result.stderr || result.message || undefined) });
+    } finally { clearTimeout(timeout); }
+  }
+  const passedTestCases = results.filter((result) => result.passed).length;
+  return { success: passedTestCases === results.length, score: results.length ? Math.round(passedTestCases / results.length * 100) : 0,
+    totalTestCases: results.length, passedTestCases, executionTimeMs, memoryKb, language,
+    stdout: `Judge0 executed ${language}. Passed ${passedTestCases}/${results.length} test cases.`, results };
+}
 
 // Unauthenticated liveness endpoint for local and future deployment health checks.
 app.get('/api/health', (_req, res) => {
@@ -48,8 +218,18 @@ app.get('/api/health', (_req, res) => {
     status: 'ok',
     appName: 'Campus Placement Assessment Portal',
     timestamp: new Date().toISOString(),
-    aiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    aiConfigured: process.env.AI_EXTERNAL_PROCESSING_ENABLED === 'true' && Boolean(process.env.GEMINI_API_KEY),
   });
+});
+
+// Readiness is separate from liveness so an orchestrator can keep the process alive during DB recovery.
+app.get('/api/ready', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'ready', dependencies: { database: 'ok' }, uptimeSeconds: Math.floor(process.uptime()) });
+  } catch {
+    res.status(503).json({ status: 'not_ready', dependencies: { database: 'unavailable' } });
+  }
 });
 
 // Initialize MySQL pool
@@ -109,6 +289,75 @@ async function getPlanDefinitionFromDb(db: any, planId: string): Promise<Subscri
   };
 }
 
+async function getWorkspaceEntitlementState(db: any, workspaceId: string) {
+  const [rows]: any = await db.execute(
+    'SELECT planId, status, currentPeriodEnd, trialEndsAt FROM WorkspaceSubscriptions WHERE workspaceId = ? LIMIT 1',
+    [workspaceId],
+  );
+  const subscription = rows[0] || { planId: 'pilot', status: 'not_configured', currentPeriodEnd: null, trialEndsAt: null };
+  const plan = await getPlanDefinitionFromDb(db, subscription.planId || 'pilot');
+  const now = Date.now();
+  const periodExpired = subscription.currentPeriodEnd && new Date(subscription.currentPeriodEnd).getTime() < now;
+  const trialExpired = subscription.status === 'trialing' && subscription.trialEndsAt && new Date(subscription.trialEndsAt).getTime() < now;
+  return { plan, status: subscription.status || 'not_configured', expired: Boolean(periodExpired || trialExpired) };
+}
+
+const permissionFeature: Partial<Record<WorkspacePermission, PlanFeature>> = {
+  'curriculum.read_own': 'curriculum', 'curriculum.read_assigned': 'curriculum', 'curriculum.progress.update_own': 'curriculum',
+  'curriculum.manage_assigned': 'curriculum', 'curriculum.manage_workspace': 'curriculum',
+  'assessment.read_own': 'assessments', 'assessment.read_assigned': 'assessments', 'assessment.submit_own': 'assessments',
+  'assessment.manage_assigned': 'assessments', 'assessment.read_workspace': 'assessments', 'assessment.manage_workspace': 'assessments', 'code.execute': 'assessments',
+  'batches.read_assigned': 'batches', 'batches.read_workspace': 'batches', 'batches.manage': 'batches',
+  'students.read_assigned': 'student_and_trainer_access', 'students.read_workspace': 'student_and_trainer_access',
+  'students.enroll': 'student_and_trainer_access', 'students.update_workspace': 'student_and_trainer_access',
+  'members.read': 'student_and_trainer_access', 'members.invite': 'student_and_trainer_access', 'members.change_role': 'student_and_trainer_access',
+  'members.change_status': 'student_and_trainer_access', 'members.password_reset': 'student_and_trainer_access',
+  'interview.read_own': 'interview_feedback', 'interview.history.read_assigned': 'interview_feedback', 'interview.panelist.read_assigned': 'interview_feedback',
+  'interview.panelist.evaluate_assigned': 'interview_feedback', 'interview.read_assigned': 'interview_feedback', 'interview.evaluate_assigned': 'interview_feedback',
+  'interview.read_workspace': 'interview_feedback', 'interview.evaluate_workspace': 'interview_feedback', 'interview.schedule_workspace': 'interview_feedback',
+  'ai.recommendation.own': 'ai_insights', 'ai.readiness.own': 'ai_insights', 'ai.recommendation.assigned': 'ai_insights',
+  'ai.readiness.assigned': 'ai_insights', 'ai.recommendation.workspace': 'ai_insights', 'ai.readiness.workspace': 'ai_insights',
+  'ai.trainer_summary': 'ai_insights', 'ai.trainer_summary.workspace': 'ai_insights',
+  'analytics.read_assigned': 'basic_analytics', 'analytics.read_workspace': 'college_analytics',
+  'leaderboard.read_assigned': 'basic_analytics',
+  'report.export_assigned': 'standard_exports', 'report.read_workspace': 'standard_exports', 'report.export_workspace': 'standard_exports',
+};
+
+async function enforceWorkspaceEntitlements(req: Request, res: Response, auth: AuthContext, permissions: WorkspacePermission[]) {
+  const state = await getWorkspaceEntitlementState(pool, auth.workspaceId);
+  const allowedPermission = permissions.find((permission) => hasWorkspacePermission(auth.role, permission));
+  const feature = allowedPermission ? permissionFeature[allowedPermission] : undefined;
+  if (!state.plan.features.includes('college_workspace') || (feature && !state.plan.features.includes(feature))) {
+    res.status(403).json({ code: 'PLAN_FEATURE_UNAVAILABLE', feature: feature || 'college_workspace', plan: state.plan.name, error: `${state.plan.name} does not include ${feature ? feature.replaceAll('_', ' ') : 'workspace access'}. Contact TalentEdge to discuss a plan change.` });
+    return false;
+  }
+  const accountAccess = allowedPermission === 'subscription.read' || allowedPermission === 'subscription.manage' || allowedPermission === 'profile.read_own' || allowedPermission === 'billing.manage';
+  if (!accountAccess && (state.expired || ['canceled', 'suspended'].includes(state.status))) {
+    res.status(403).json({ code: 'SUBSCRIPTION_INACTIVE', status: state.status, error: 'This workspace subscription is inactive or expired. Contact your college administrator.' });
+    return false;
+  }
+  if (!accountAccess && state.status === 'past_due' && !['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase())) {
+    res.status(403).json({ code: 'SUBSCRIPTION_PAST_DUE', error: 'Workspace changes are paused while the subscription is past due. Contact your college administrator.' });
+    return false;
+  }
+  return true;
+}
+
+function requireWorkspaceFeature(feature: PlanFeature) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const auth = (req as AuthenticatedRequest).auth;
+    const check = async () => {
+      const session = (req as AuthenticatedRequest).auth;
+      if (!session) return res.status(401).json({ error: 'Authentication required' });
+      const state = await getWorkspaceEntitlementState(pool, session.workspaceId);
+      if (!state.plan.features.includes(feature)) return res.status(403).json({ code: 'PLAN_FEATURE_UNAVAILABLE', feature, plan: state.plan.name, error: `${state.plan.name} does not include ${feature.replaceAll('_', ' ')}.` });
+      next();
+    };
+    if (auth) void check().catch((error) => { console.error('Subscription entitlement check failed:', error); res.status(500).json({ error: 'Could not verify workspace subscription entitlements.' }); });
+    else authenticate(req, res, () => { void check().catch((error) => { console.error('Subscription entitlement check failed:', error); res.status(500).json({ error: 'Could not verify workspace subscription entitlements.' }); }); });
+  };
+}
+
 async function getWorkspaceLimitState(db: any, workspaceId: string, key: PlanLimitKey) {
   const [subscriptionRows]: any = await db.execute('SELECT planId FROM WorkspaceSubscriptions WHERE workspaceId = ? LIMIT 1', [workspaceId]);
   const plan = await getPlanDefinitionFromDb(db, subscriptionRows[0]?.planId || 'pilot');
@@ -153,8 +402,16 @@ async function reserveWorkspaceAiCredit(workspaceId: string) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    const [subscriptions]: any = await connection.execute('SELECT planId FROM WorkspaceSubscriptions WHERE workspaceId = ? FOR UPDATE', [workspaceId]);
-    const plan = await getPlanDefinitionFromDb(connection, subscriptions[0]?.planId || 'pilot');
+    const [subscriptions]: any = await connection.execute('SELECT planId, status, currentPeriodEnd, trialEndsAt FROM WorkspaceSubscriptions WHERE workspaceId = ? FOR UPDATE', [workspaceId]);
+    const subscription = subscriptions[0] || { planId: 'pilot', status: 'not_configured', currentPeriodEnd: null, trialEndsAt: null };
+    const plan = await getPlanDefinitionFromDb(connection, subscription.planId || 'pilot');
+    const now = Date.now();
+    if (['canceled', 'suspended', 'past_due'].includes(subscription.status)
+      || (subscription.currentPeriodEnd && new Date(subscription.currentPeriodEnd).getTime() < now)
+      || (subscription.status === 'trialing' && subscription.trialEndsAt && new Date(subscription.trialEndsAt).getTime() < now)) {
+      await connection.rollback();
+      return { allowed: false as const, message: 'AI processing is unavailable while this workspace subscription is inactive or past due.' };
+    }
     if (!plan.features.includes('ai_insights')) {
       await connection.rollback();
       return { allowed: false as const, message: `${plan.name} does not include AI insights. Contact TalentEdge to discuss a plan change.` };
@@ -221,8 +478,183 @@ function serializeAssessment(row: any, hideAnswerKey = false) {
   };
 }
 
+async function saveAssessmentVersion(db: any, assessment: any, actorUserId: string | null, changeSummary: string) {
+  const versionNumber = Number(assessment.currentVersion || 1);
+  await db.execute(
+    `INSERT IGNORE INTO AssessmentVersions
+     (id, workspaceId, assessmentId, versionNumber, snapshotJson, changeSummary, createdByUserId)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), assessment.workspaceId, assessment.id, versionNumber,
+      JSON.stringify(serializeAssessment(assessment)), changeSummary, actorUserId],
+  );
+}
+
+function normalizeAssessmentDate(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return undefined;
+  return value.includes('T') ? `${value.replace('T', ' ')}${value.length === 16 ? ':00' : ''}` : value;
+}
+
+function validateAssessmentSections(parsedSections: any): { error?: string; totalMarks: number; hasCoding: boolean } {
+  if (!Array.isArray(parsedSections) || parsedSections.length < 1 || parsedSections.length > 20
+    || parsedSections.some((section: any) => !section || typeof section.name !== 'string'
+      || !Array.isArray(section.questions) || section.questions.length > 100)) {
+    return { error: 'Add at least one valid section containing questions.', totalMarks: 0, hasCoding: false };
+  }
+  let totalMarks = 0;
+  let questionCount = 0;
+  let codingCount = 0;
+  for (const section of parsedSections) {
+    if (typeof section.id !== 'string' || !section.id || !section.name.trim()) {
+      return { error: 'Every section needs an id and name.', totalMarks: 0, hasCoding: false };
+    }
+    for (const question of section.questions) {
+      questionCount += 1;
+      if (questionCount > 100) return { error: 'An assessment can contain at most 100 questions.', totalMarks: 0, hasCoding: false };
+      const data = question?.data;
+      if (question?.type === 'mcq') {
+        if (!data || typeof data.text !== 'string' || !data.text.trim() || !Array.isArray(data.options)
+          || data.options.length < 2 || data.options.length > 8
+          || data.options.some((option: any) => typeof option !== 'string')
+          || !Number.isInteger(data.correctIndex) || data.correctIndex < 0 || data.correctIndex >= data.options.length
+          || !Number.isFinite(data.marks) || data.marks < 1 || data.marks > 100) {
+          return { error: 'Each multiple-choice question needs a prompt, 2–8 options, a correct option, and marks from 1 to 100.', totalMarks: 0, hasCoding: false };
+        }
+        totalMarks += data.marks;
+      } else if (question?.type === 'coding') {
+        codingCount += 1;
+        if (codingCount > 3) return { error: 'An assessment can contain at most 3 coding questions.', totalMarks: 0, hasCoding: false };
+        if (!data || typeof data.title !== 'string' || !data.title.trim()
+          || typeof data.description !== 'string' || !data.description.trim()
+          || !Array.isArray(data.testCases) || data.testCases.length < 1 || data.testCases.length > 10
+          || data.testCases.some((testCase: any) => typeof testCase.input !== 'string' || testCase.input.length > 20000
+            || typeof testCase.expected !== 'string' || testCase.expected.length > 20000
+            || (testCase.hidden !== undefined && typeof testCase.hidden !== 'boolean'))
+          || !Number.isFinite(data.marks ?? 30) || (data.marks ?? 30) < 1 || (data.marks ?? 30) > 100
+          || !data.templates || typeof data.templates !== 'object'
+          || Object.values(data.templates).every((template: any) => typeof template !== 'string')) {
+          return { error: 'Each coding question needs instructions, 1–10 input/output test cases, at least one starter template, and valid marks.', totalMarks: 0, hasCoding: false };
+        }
+        totalMarks += data.marks ?? 30;
+      } else return { error: 'Question type must be multiple choice or coding.', totalMarks: 0, hasCoding: false };
+    }
+  }
+  if (!totalMarks) return { error: 'Add at least one question to the assessment.', totalMarks: 0, hasCoding: false };
+  return { totalMarks, hasCoding: codingCount > 0 };
+}
+
 function hashToken(token: string) {
   return createHash('sha256').update(token).digest('hex');
+}
+
+type AccountEmailType = 'workspace_invitation' | 'college_admin_invitation' | 'platform_admin_invitation' | 'password_reset' | 'mfa_reset' | 'account_notice';
+type AccountEmailStatus = 'sent' | 'failed' | 'not_configured';
+
+function escapeEmailHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
+}
+
+function getPublicAppBaseUrl(req: Request) {
+  const configured = process.env.PUBLIC_APP_URL || process.env.APP_URL;
+  if (configured && !configured.includes('MY_APP_URL')) {
+    try { const url = new URL(configured); if (url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) return url.origin; } catch { /* use local fallback only outside production */ }
+  }
+  if (process.env.NODE_ENV === 'production') return null;
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+async function reserveAccountEmailRateLimit(workspaceId: string | null, email: string, type: AccountEmailType, clientIp: string) {
+  const scope = workspaceId || 'platform';
+  const now = Date.now();
+  const buckets = [
+    { key: `recipient:${scope}:${type}:${email.trim().toLowerCase()}`, limit: 5, windowSeconds: 3600 },
+    { key: `ip:${scope}:${type}:${clientIp || 'unknown'}`, limit: 20, windowSeconds: 3600 },
+    { key: `workspace:${scope}:${type}`, limit: 100, windowSeconds: 3600 },
+  ].map((bucket) => ({ ...bucket, hash: createHash('sha256').update(bucket.key).digest('hex') }));
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    for (const bucket of buckets) {
+      await connection.execute('INSERT IGNORE INTO AccountEmailRateLimits (bucketKey, windowStartedAt, requestCount) VALUES (?, UTC_TIMESTAMP(), 0)', [bucket.hash]);
+      const [[row]]: any = await connection.execute('SELECT requestCount, TIMESTAMPDIFF(SECOND, windowStartedAt, UTC_TIMESTAMP()) AS ageSeconds FROM AccountEmailRateLimits WHERE bucketKey = ? FOR UPDATE', [bucket.hash]);
+      const expired = Number(row.ageSeconds) >= bucket.windowSeconds;
+      if (!expired && Number(row.requestCount) >= bucket.limit) { await connection.rollback(); return false; }
+      await connection.execute(
+        'UPDATE AccountEmailRateLimits SET windowStartedAt = IF(? = 1, UTC_TIMESTAMP(), windowStartedAt), requestCount = IF(? = 1, 1, requestCount + 1) WHERE bucketKey = ?',
+        [expired ? 1 : 0, expired ? 1 : 0, bucket.hash],
+      );
+    }
+    await connection.commit();
+    return true;
+  } catch (error) { await connection.rollback(); throw error; }
+  finally { connection.release(); }
+}
+
+async function deliverAccountEmail(input: {
+  workspaceId: string | null; recipientEmail: string; type: AccountEmailType; relatedEntityId?: string | null;
+  subject: string; text: string; html: string; baseUrlConfigured: boolean; forcedError?: string;
+}): Promise<{ id: string; status: AccountEmailStatus }> {
+  const id = randomUUID();
+  const apiKey = process.env.RESEND_API_KEY || '';
+  const from = process.env.EMAIL_FROM || '';
+  let status: AccountEmailStatus = 'not_configured';
+  let providerMessageId: string | null = null;
+  let lastError: string | null = null;
+  if (input.forcedError) {
+    status = 'failed'; lastError = input.forcedError;
+  } else if (!apiKey || !from || !input.baseUrlConfigured) {
+    lastError = !apiKey ? 'RESEND_API_KEY is not configured.' : !from ? 'EMAIL_FROM is not configured.' : 'PUBLIC_APP_URL is required for production email links.';
+  } else {
+    try {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': id },
+        body: JSON.stringify({ from, to: [input.recipientEmail], subject: input.subject, text: input.text, html: input.html }),
+        signal: AbortSignal.timeout(10000),
+      });
+      const result: any = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(`Resend rejected the message (HTTP ${response.status}).`);
+      status = 'sent'; providerMessageId = typeof result.id === 'string' ? result.id : null;
+    } catch (error) {
+      status = 'failed'; lastError = error instanceof Error ? error.message.slice(0, 490) : 'Email provider request failed.';
+    }
+  }
+  try {
+    await pool.execute(
+      `INSERT INTO AccountEmailDeliveries (id, workspaceId, recipientEmail, deliveryType, relatedEntityId, status, providerMessageId, lastError, sentAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, IF(? = 'sent', UTC_TIMESTAMP(), NULL))`,
+      [id, input.workspaceId, input.recipientEmail.trim().toLowerCase(), input.type, input.relatedEntityId || null, status, providerMessageId, lastError, status],
+    );
+  } catch (error) {
+    console.error('Could not persist account email delivery status:', error);
+  }
+  return { id, status };
+}
+
+async function sendAccountLifecycleEmail(req: Request, input: {
+  workspaceId: string | null; recipientEmail: string; recipientName?: string; type: AccountEmailType;
+  relatedEntityId?: string | null; heading: string; message: string; actionLabel?: string; actionUrl?: string; expiry?: string;
+  rateLimitReserved?: boolean;
+}) {
+  let allowed = Boolean(input.rateLimitReserved);
+  let forcedError: string | undefined;
+  if (!allowed) {
+    try { allowed = await reserveAccountEmailRateLimit(input.workspaceId, input.recipientEmail, input.type, req.ip); }
+    catch (error) { console.error('Account email rate limit could not be checked:', error); forcedError = 'Email rate limiting is unavailable; message was not sent.'; }
+    if (!allowed && !forcedError) forcedError = 'Email delivery rate limit exceeded.';
+  }
+  const baseUrl = getPublicAppBaseUrl(req);
+  const safeHeading = escapeEmailHtml(input.heading);
+  const safeName = escapeEmailHtml(input.recipientName || '');
+  const safeMessage = escapeEmailHtml(input.message);
+  const safeAction = escapeEmailHtml(input.actionLabel || 'Continue');
+  const link = input.actionUrl && baseUrl ? new URL(input.actionUrl, baseUrl).toString() : null;
+  const safeLink = link ? escapeEmailHtml(link) : null;
+  const subject = input.heading;
+  const text = `${input.recipientName ? `Hello ${input.recipientName},\n\n` : ''}${input.message}${link ? `\n\n${input.actionLabel || 'Continue'}: ${link}` : ''}${input.expiry ? `\n\n${input.expiry}` : ''}\n\nTalentEdge`;
+  const html = `<!doctype html><html><body style="margin:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#0f172a"><div style="max-width:560px;margin:32px auto;padding:32px;background:#fff;border-radius:16px"><p style="font-size:12px;font-weight:bold;letter-spacing:2px;color:#4f46e5">TALENTEDGE</p><h1 style="font-size:22px">${safeHeading}</h1>${safeName ? `<p>Hello ${safeName},</p>` : ''}<p style="line-height:1.6">${safeMessage}</p>${safeLink ? `<p style="margin:28px 0"><a href="${safeLink}" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:bold">${safeAction}</a></p><p style="font-size:12px;color:#64748b;word-break:break-all">If the button does not work, open: ${safeLink}</p>` : ''}${input.expiry ? `<p style="font-size:12px;color:#64748b">${escapeEmailHtml(input.expiry)}</p>` : ''}<hr style="border:0;border-top:1px solid #e2e8f0;margin:24px 0"><p style="font-size:11px;color:#64748b">If you did not expect this message, contact your college administrator.</p></div></body></html>`;
+  return deliverAccountEmail({ workspaceId: input.workspaceId, recipientEmail: input.recipientEmail, type: input.type, relatedEntityId: input.relatedEntityId, subject, text, html, baseUrlConfigured: Boolean(baseUrl), forcedError });
 }
 
 async function hashPassword(password: string) {
@@ -345,12 +777,45 @@ async function authenticate(req: Request, res: Response, next: NextFunction) {
   }
 }
 
-function requireRole(...roles: AuthContext['role'][]) {
+function requireWorkspacePermission(...permissions: WorkspacePermission[]) {
   return (req: Request, res: Response, next: NextFunction) => {
     const auth = (req as AuthenticatedRequest).auth;
-    if (!auth || !roles.includes(auth.role)) return res.status(403).json({ error: 'Insufficient workspace permissions' });
-    next();
+    const authorize = () => {
+      const session = (req as AuthenticatedRequest).auth;
+      if (!session || !permissions.some((permission) => hasWorkspacePermission(session.role, permission))) {
+        return res.status(403).json({ error: 'Insufficient workspace permissions' });
+      }
+      void enforceWorkspaceEntitlements(req, res, session, permissions)
+        .then((allowed) => { if (allowed) next(); })
+        .catch((error) => { console.error('Subscription entitlement check failed:', error); res.status(500).json({ error: 'Could not verify workspace subscription entitlements.' }); });
+    };
+    if (auth) return authorize();
+    return authenticate(req, res, authorize);
   };
+}
+
+function requirePlatformPermission(permission: WorkspacePermission) {
+  return (req: Request, res: Response, next: NextFunction) => requirePlatformAdmin(req, res, () => {
+    if (!hasPlatformPermission('platform_admin', permission)) return res.status(403).json({ error: 'Insufficient platform permissions.' });
+    next();
+  });
+}
+
+async function canAccessStudent(auth: AuthContext, studentId: unknown): Promise<boolean> {
+  if (typeof studentId !== 'string' || !studentId) return false;
+  if (auth.role === 'student') return auth.userId === studentId;
+  if (auth.role !== 'college_admin' && auth.role !== 'trainer') return false;
+  const [rows]: any = await pool.execute(
+    `SELECT 1 FROM WorkspaceMemberships wm
+     LEFT JOIN WorkspaceStudentProfiles sp ON sp.workspaceId = wm.workspaceId AND sp.userId = wm.userId
+     WHERE wm.workspaceId = ? AND wm.userId = ? AND wm.role = 'student' AND wm.status = 'active'
+       AND (? = 'college_admin' OR EXISTS (
+         SELECT 1 FROM WorkspaceBatchAssignments ba
+         WHERE ba.workspaceId = wm.workspaceId AND ba.batchId = sp.batchId AND ba.trainerUserId = ?
+       )) LIMIT 1`,
+    [auth.workspaceId, studentId, auth.role, auth.userId],
+  );
+  return rows.length > 0;
 }
 
 // Public account routes: setup, sign-in, invitation acceptance and sign-out.
@@ -536,6 +1001,12 @@ app.post('/api/auth/accept-invitation', async (req, res) => {
       return res.status(400).json({ error: 'This invitation is invalid or has expired.' });
     }
     await connection.execute('SELECT id FROM Workspaces WHERE id = ? FOR UPDATE', [invitation.workspaceId]);
+    const entitlement = await getWorkspaceEntitlementState(connection, invitation.workspaceId);
+    const requiredFeature: PlanFeature = invitation.role === 'panelist' ? 'interview_feedback' : 'student_and_trainer_access';
+    if (entitlement.expired || ['canceled', 'suspended', 'past_due'].includes(entitlement.status) || !entitlement.plan.features.includes(requiredFeature)) {
+      await connection.rollback();
+      return res.status(409).json({ code: 'SUBSCRIPTION_ENTITLEMENT_REQUIRED', error: 'This workspace cannot accept invitations under its current subscription. Ask the college administrator to review the plan and status.' });
+    }
     if (invitation.role === 'student' || invitation.role === 'trainer' || invitation.role === 'panelist') {
       const key: PlanLimitKey = invitation.role === 'student' ? 'active_students' : 'trainer_seats';
       const capacity = await getWorkspaceLimitState(connection, invitation.workspaceId, key);
@@ -607,7 +1078,8 @@ app.post('/api/auth/accept-invitation', async (req, res) => {
     );
     await connection.commit();
     await createSession(userId, invitation.workspaceId, res);
-    res.json({ success: true });
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: invitation.workspaceId, recipientEmail: invitation.email, recipientName: name.trim(), type: 'account_notice', relatedEntityId: invitation.id, heading: 'Your TalentEdge account is ready', message: 'Your invitation was accepted and workspace access is now active. You can sign in and get started.' });
+    res.json({ success: true, delivery });
   } catch (error: any) {
     await connection.rollback();
     console.error('Invitation acceptance failed:', error);
@@ -626,8 +1098,8 @@ app.post('/api/auth/reset-password', async (req, res) => {
   try {
     await connection.beginTransaction();
     const [rows]: any = await connection.execute(
-      `SELECT id, workspaceId, userId FROM WorkspacePasswordResets
-       WHERE tokenHash = ? AND usedAt IS NULL AND expiresAt > UTC_TIMESTAMP() LIMIT 1 FOR UPDATE`,
+      `SELECT r.id, r.workspaceId, r.userId, u.name, u.email FROM WorkspacePasswordResets r
+       JOIN Users u ON u.id = r.userId WHERE r.tokenHash = ? AND r.usedAt IS NULL AND r.expiresAt > UTC_TIMESTAMP() LIMIT 1 FOR UPDATE`,
       [hashToken(token)],
     );
     const reset = rows[0];
@@ -645,13 +1117,43 @@ app.post('/api/auth/reset-password', async (req, res) => {
     );
     await connection.commit();
     clearSessionCookie(res);
-    res.json({ success: true });
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: reset.workspaceId, recipientEmail: reset.email, recipientName: reset.name, type: 'account_notice', relatedEntityId: reset.id, heading: 'Your password was changed', message: 'The password for your TalentEdge account was successfully changed. If you did not make this change, contact your college administrator immediately.' });
+    res.json({ success: true, delivery });
   } catch (error) {
     await connection.rollback();
     console.error('Password reset failed:', error);
     res.status(500).json({ error: 'Could not reset the password.' });
   } finally {
     connection.release();
+  }
+});
+
+app.post('/api/auth/request-password-reset', async (req, res) => {
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+  try {
+    if (!(await reserveAccountEmailRateLimit(null, email, 'password_reset', req.ip))) return res.status(429).json({ code: 'EMAIL_RATE_LIMITED', error: 'Too many reset emails were requested. Try again later.' });
+    const [memberships]: any = await pool.execute(
+      `SELECT wm.workspaceId, u.id AS userId, u.name, u.email FROM Users u
+       JOIN WorkspaceMemberships wm ON wm.userId = u.id AND wm.status = 'active'
+       WHERE LOWER(u.email) = ? AND u.isActive = 1 AND u.passwordHash IS NOT NULL
+       ORDER BY wm.createdAt ASC LIMIT 1`, [email],
+    );
+    if (memberships.length) {
+      const member = memberships[0];
+      const token = randomBytes(32).toString('base64url');
+      const resetId = randomUUID();
+      await pool.execute(
+        `INSERT INTO WorkspacePasswordResets (id, workspaceId, userId, tokenHash, expiresAt, createdByUserId)
+         VALUES (?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 1 HOUR), NULL)`,
+        [resetId, member.workspaceId, member.userId, hashToken(token)],
+      );
+      await sendAccountLifecycleEmail(req, { workspaceId: member.workspaceId, recipientEmail: member.email, recipientName: member.name, type: 'password_reset', relatedEntityId: resetId, heading: 'Reset your TalentEdge password', message: 'A password reset was requested for your account. If you did not make this request, you can ignore this email.', actionLabel: 'Reset password', actionUrl: `/?reset=${encodeURIComponent(token)}`, expiry: 'This one-time link expires in 60 minutes.', rateLimitReserved: true });
+    }
+    res.json({ success: true, message: 'If an active account uses that email, password reset instructions will be sent.' });
+  } catch (error) {
+    console.error('Password reset request failed:', error);
+    res.status(500).json({ error: 'Could not process the password reset request.' });
   }
 });
 
@@ -662,26 +1164,27 @@ app.post('/api/auth/logout', async (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/auth/change-password', authenticate, async (req, res) => {
+app.post('/api/auth/change-password', requireWorkspacePermission('profile.update_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { currentPassword, newPassword } = req.body || {};
   if (!validPassword(newPassword) || typeof currentPassword !== 'string') {
     return res.status(400).json({ error: 'The new password must be at least 12 characters.' });
   }
   try {
-    const [rows]: any = await pool.execute('SELECT passwordHash FROM Users WHERE id = ?', [auth.userId]);
+    const [rows]: any = await pool.execute('SELECT passwordHash, name, email FROM Users WHERE id = ?', [auth.userId]);
     if (!(await verifyPassword(currentPassword, rows[0]?.passwordHash))) return res.status(400).json({ error: 'Current password is incorrect.' });
     const nextHash = await hashPassword(newPassword);
     await pool.execute('UPDATE Users SET passwordHash = ? WHERE id = ?', [nextHash, auth.userId]);
     await pool.execute('DELETE FROM AuthSessions WHERE userId = ? AND id <> ?', [auth.userId, auth.sessionId]);
-    res.json({ success: true });
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: auth.workspaceId, recipientEmail: rows[0].email, recipientName: rows[0].name, type: 'account_notice', relatedEntityId: auth.userId, heading: 'Your password was changed', message: 'The password for your TalentEdge account was successfully changed. If you did not make this change, contact your college administrator immediately.' });
+    res.json({ success: true, delivery });
   } catch (error) {
     console.error('Password update failed:', error);
     res.status(500).json({ error: 'Could not update the password.' });
   }
 });
 
-app.patch('/api/auth/profile', authenticate, async (req, res) => {
+app.patch('/api/auth/profile', requireWorkspacePermission('profile.update_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
   const avatar = req.body?.avatar;
@@ -715,7 +1218,7 @@ app.patch('/api/auth/profile', authenticate, async (req, res) => {
   }
 });
 
-app.get('/api/auth/me', authenticate, (req, res) => {
+app.get('/api/auth/me', requireWorkspacePermission('profile.read_own'), (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   res.json({
     user: { id: auth.userId, name: auth.name, email: auth.email, avatar: auth.avatar },
@@ -726,7 +1229,7 @@ app.get('/api/auth/me', authenticate, (req, res) => {
 
 // Platform endpoints authenticate with a separate cookie and never receive a workspace context.
 // All other application data endpoints require an active workspace session.
-app.use('/api', (req, res, next) => req.path.startsWith('/platform/') ? next() : authenticate(req, res, next));
+app.use('/api', (req, res, next) => req.path.startsWith('/platform/') || req.path === '/billing/razorpay/webhook' ? next() : authenticate(req, res, next));
 
 app.post('/api/platform/auth/login', async (req, res) => {
   const { email, password, code } = req.body || {};
@@ -863,12 +1366,12 @@ app.post('/api/platform/workspace-invitations/accept', async (req, res) => {
   } finally { connection.release(); }
 });
 
-app.get('/api/platform/auth/me', requirePlatformAdmin, (req, res) => {
+app.get('/api/platform/auth/me', requirePlatformPermission('platform.operations.read'), (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   res.json({ user: { id: admin.platformAdminId, name: admin.name, email: admin.email }, role: 'platform_admin' });
 });
 
-app.post('/api/platform/auth/logout', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/auth/logout', requirePlatformPermission('platform.operations.read'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   await pool.execute('DELETE FROM PlatformAdminSessions WHERE id = ?', [admin.sessionId]);
   await pool.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId) VALUES (?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'platform_admin.signed_out', 'platform_admin', admin.platformAdminId]);
@@ -876,7 +1379,7 @@ app.post('/api/platform/auth/logout', requirePlatformAdmin, async (req, res) => 
   res.json({ success: true });
 });
 
-app.get('/api/platform/overview', requirePlatformAdmin, async (req, res) => {
+app.get('/api/platform/overview', requirePlatformPermission('platform.operations.read'), async (req, res) => {
   try {
     const [rows]: any = await pool.query(
       `SELECT COUNT(*) AS totalWorkspaces,
@@ -953,7 +1456,7 @@ app.get('/api/platform/overview', requirePlatformAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/platform/content/applications', requirePlatformAdmin, async (req, res) => {
+app.get('/api/platform/content/applications', requirePlatformPermission('platform.shared_content.manage'), async (req, res) => {
   const workspaceId = String(req.query.workspaceId || '').trim();
   const dateFrom = String(req.query.dateFrom || '').trim();
   const dateTo = String(req.query.dateTo || '').trim();
@@ -984,7 +1487,7 @@ app.get('/api/platform/content/applications', requirePlatformAdmin, async (req, 
   }
 });
 
-app.get('/api/platform/content/rollout', requirePlatformAdmin, async (_req, res) => {
+app.get('/api/platform/content/rollout', requirePlatformPermission('platform.shared_content.manage'), async (_req, res) => {
   try {
     const [rows]: any = await pool.query(
       `SELECT w.id AS workspaceId, w.name AS workspaceName, w.lifecycleStatus,
@@ -1012,7 +1515,7 @@ app.get('/api/platform/content/rollout', requirePlatformAdmin, async (_req, res)
   }
 });
 
-app.get('/api/platform/content/versions', requirePlatformAdmin, async (_req, res) => {
+app.get('/api/platform/content/versions', requirePlatformPermission('platform.shared_content.manage'), async (_req, res) => {
   try {
     const [rows]: any = await pool.query(
       `SELECT v.id, v.versionNumber, v.title, v.status,
@@ -1036,7 +1539,7 @@ app.get('/api/platform/content/versions', requirePlatformAdmin, async (_req, res
   }
 });
 
-app.get('/api/platform/content/versions/:id', requirePlatformAdmin, async (req, res) => {
+app.get('/api/platform/content/versions/:id', requirePlatformPermission('platform.shared_content.manage'), async (req, res) => {
   try {
     const [rows]: any = await pool.execute(
       `SELECT v.id, v.versionNumber, v.title, v.status, v.contentJson,
@@ -1055,7 +1558,7 @@ app.get('/api/platform/content/versions/:id', requirePlatformAdmin, async (req, 
   }
 });
 
-app.post('/api/platform/content/versions', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/content/versions', requirePlatformPermission('platform.shared_content.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const connection = await pool.getConnection();
   try {
@@ -1078,7 +1581,7 @@ app.post('/api/platform/content/versions', requirePlatformAdmin, async (req, res
   } finally { connection.release(); }
 });
 
-app.put('/api/platform/content/versions/:id', requirePlatformAdmin, async (req, res) => {
+app.put('/api/platform/content/versions/:id', requirePlatformPermission('platform.shared_content.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
   const materialsInput = req.body?.materials;
@@ -1131,7 +1634,7 @@ app.put('/api/platform/content/versions/:id', requirePlatformAdmin, async (req, 
   } finally { connection.release(); }
 });
 
-app.post('/api/platform/content/versions/:id/publish', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/content/versions/:id/publish', requirePlatformPermission('platform.shared_content.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   if (reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Provide a publish reason of at least five characters.' });
@@ -1221,13 +1724,23 @@ const applySharedContentHandler = async (req: Request, res: Response, rollbackOn
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
           [`${workspaceId}:${assessment.id}`, workspaceId, ...values.slice(0, 11), assessment.id, versionId],
         );
+        const sharedAssessmentId = `${workspaceId}:${assessment.id}`;
+        await connection.execute(
+          `INSERT IGNORE INTO AssessmentAssignmentRules (assessmentId, workspaceId, batchId, maxAttempts, resultReleasePolicy)
+           VALUES (?, ?, NULL, 0, 'immediate')`,
+          [sharedAssessmentId, workspaceId],
+        );
+        const [createdAssessment]: any = await connection.execute('SELECT * FROM Assessments WHERE id = ? AND workspaceId = ?', [sharedAssessmentId, workspaceId]);
+        if (createdAssessment.length) await saveAssessmentVersion(connection, createdAssessment[0], null, `Shared content v${Number(versions[0].versionNumber)} applied`);
         assessmentAdded += 1;
       } else if (Number(existing[0].isCustomized)) assessmentPreserved += 1;
       else {
         await connection.execute(
-          `UPDATE Assessments SET dayNumber = ?, title = ?, type = ?, durationMinutes = ?, totalMarks = ?, coverageJson = ?, purpose = ?, status = ?, scheduledDate = ?, sectionsJson = ?, targetCompaniesJson = ?, sourceVersionId = ?, isArchived = 0 WHERE id = ? AND workspaceId = ?`,
+          `UPDATE Assessments SET dayNumber = ?, title = ?, type = ?, durationMinutes = ?, totalMarks = ?, coverageJson = ?, purpose = ?, status = ?, scheduledDate = ?, sectionsJson = ?, targetCompaniesJson = ?, sourceVersionId = ?, currentVersion = currentVersion + 1, isArchived = 0 WHERE id = ? AND workspaceId = ?`,
           [...values, existing[0].id, workspaceId],
         );
+        const [updatedAssessment]: any = await connection.execute('SELECT * FROM Assessments WHERE id = ? AND workspaceId = ?', [existing[0].id, workspaceId]);
+        if (updatedAssessment.length) await saveAssessmentVersion(connection, updatedAssessment[0], null, `Shared content v${Number(versions[0].versionNumber)} applied`);
         assessmentUpdated += 1;
       }
     }
@@ -1247,10 +1760,10 @@ const applySharedContentHandler = async (req: Request, res: Response, rollbackOn
   } finally { connection.release(); }
 };
 
-app.post('/api/platform/content/versions/:id/apply', requirePlatformAdmin, (req, res) => applySharedContentHandler(req, res));
-app.post('/api/platform/content/versions/:id/rollback', requirePlatformAdmin, (req, res) => applySharedContentHandler(req, res, true));
+app.post('/api/platform/content/versions/:id/apply', requirePlatformPermission('platform.shared_content.manage'), (req, res) => applySharedContentHandler(req, res));
+app.post('/api/platform/content/versions/:id/rollback', requirePlatformPermission('platform.shared_content.manage'), (req, res) => applySharedContentHandler(req, res, true));
 
-app.get('/api/platform/subscription-history', requirePlatformAdmin, async (req, res) => {
+app.get('/api/platform/subscription-history', requirePlatformPermission('platform.billing.read'), async (req, res) => {
   const workspaceId = String(req.query.workspaceId || '').trim();
   const status = String(req.query.status || '').trim();
   const dateFrom = String(req.query.dateFrom || '').trim();
@@ -1291,7 +1804,7 @@ app.get('/api/platform/subscription-history', requirePlatformAdmin, async (req, 
   }
 });
 
-app.get('/api/platform/audit', requirePlatformAdmin, async (req, res) => {
+app.get('/api/platform/audit', requirePlatformPermission('platform.operations.read'), async (req, res) => {
   const query = String(req.query.q || '').trim().slice(0, 120);
   const action = String(req.query.action || '').trim().slice(0, 100);
   const targetType = String(req.query.targetType || '').trim().slice(0, 50);
@@ -1346,17 +1859,17 @@ app.get('/api/platform/audit', requirePlatformAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/platform/plans', requirePlatformAdmin, async (_req, res) => {
+app.get('/api/platform/plans', requirePlatformPermission('platform.plans.manage'), async (_req, res) => {
   try {
-    const [rows]: any = await pool.query('SELECT id, name, description, limitsJson, featuresJson, isActive, DATE_FORMAT(updatedAt, \'%Y-%m-%d %H:%i:%s\') AS updatedAt FROM PlatformSubscriptionPlans ORDER BY FIELD(id, \'pilot\', \'campus\', \'campus_plus\')');
-    res.json(rows.map((row: any) => ({ id: row.id, name: row.name, description: row.description, limits: parseStoredJson<PlanLimit[]>(row.limitsJson, []), features: parseStoredJson<PlanFeature[]>(row.featuresJson, []), isActive: Boolean(row.isActive), updatedAt: row.updatedAt })));
+    const [rows]: any = await pool.query('SELECT id, name, description, limitsJson, featuresJson, monthlyPricePaise, annualPricePaise, isActive, DATE_FORMAT(updatedAt, \'%Y-%m-%d %H:%i:%s\') AS updatedAt FROM PlatformSubscriptionPlans ORDER BY FIELD(id, \'pilot\', \'campus\', \'campus_plus\')');
+    res.json(rows.map((row: any) => ({ id: row.id, name: row.name, description: row.description, monthlyPricePaise: row.monthlyPricePaise === null ? null : Number(row.monthlyPricePaise), annualPricePaise: row.annualPricePaise === null ? null : Number(row.annualPricePaise), limits: parseStoredJson<PlanLimit[]>(row.limitsJson, []), features: parseStoredJson<PlanFeature[]>(row.featuresJson, []), isActive: Boolean(row.isActive), updatedAt: row.updatedAt })));
   } catch (error) {
     console.error('Subscription plan catalog query failed:', error);
     res.status(500).json({ error: 'Could not load subscription plans. Apply the latest database migration.' });
   }
 });
 
-app.put('/api/platform/plans/:id', requirePlatformAdmin, async (req, res) => {
+app.put('/api/platform/plans/:id', requirePlatformPermission('platform.plans.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const planId = req.params.id;
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
@@ -1364,11 +1877,14 @@ app.put('/api/platform/plans/:id', requirePlatformAdmin, async (req, res) => {
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   const limits = req.body?.limits;
   const features = req.body?.features;
+  const monthlyPricePaise = req.body?.monthlyPricePaise;
+  const annualPricePaise = req.body?.annualPricePaise;
   const isActive = req.body?.isActive;
   const validPlanIds = new Set(SUBSCRIPTION_PLANS.map((plan) => plan.id));
   const allowedLimits = new Map(SUBSCRIPTION_PLANS[0].limits.map((limit) => [limit.key, limit.unit]));
   const allowedFeatures = new Set(SUBSCRIPTION_PLANS.flatMap((plan) => plan.features));
-  if (!validPlanIds.has(planId as any) || name.length < 2 || name.length > 120 || description.length > 1000 || reason.length < 5 || reason.length > 1000 || !Array.isArray(limits) || !Array.isArray(features) || typeof isActive !== 'boolean') return res.status(400).json({ error: 'Provide a plan name, description, limits, features, active state, and change reason.' });
+  const validPrice = (value: unknown) => value === null || (Number.isSafeInteger(value) && Number(value) >= 100 && Number(value) <= 4294967295);
+  if (!validPlanIds.has(planId as any) || name.length < 2 || name.length > 120 || description.length > 1000 || reason.length < 5 || reason.length > 1000 || !Array.isArray(limits) || !Array.isArray(features) || typeof isActive !== 'boolean' || !validPrice(monthlyPricePaise) || !validPrice(annualPricePaise)) return res.status(400).json({ error: 'Provide a plan name, description, valid INR prices (at least ₹1) or unset prices, limits, features, active state, and change reason.' });
   const limitKeys = limits.map((limit: any) => limit?.key);
   if (limits.length !== allowedLimits.size || new Set(limitKeys).size !== allowedLimits.size || limits.some((limit: any) => !allowedLimits.has(limit?.key) || limit?.unit !== allowedLimits.get(limit.key) || (limit.value !== null && (!Number.isInteger(limit.value) || limit.value < 0 || limit.value > 10000000)))) return res.status(400).json({ error: 'Each supported plan limit must have a valid non-negative integer value or be unset.' });
   if (features.some((feature: any) => typeof feature !== 'string' || !allowedFeatures.has(feature as PlanFeature)) || new Set(features).size !== features.length) return res.status(400).json({ error: 'The selected plan features are invalid or duplicated.' });
@@ -1381,9 +1897,9 @@ app.put('/api/platform/plans/:id', requirePlatformAdmin, async (req, res) => {
       const [[usage]]: any = await connection.execute('SELECT COUNT(*) AS assignedCount FROM WorkspaceSubscriptions WHERE planId = ?', [planId]);
       if (Number(usage.assignedCount) > 0) { await connection.rollback(); return res.status(409).json({ error: 'A plan assigned to colleges cannot be deactivated. Move those subscriptions to another plan first.' }); }
     }
-    const before = { name: currentRows[0].name, description: currentRows[0].description, limits: parseStoredJson<PlanLimit[]>(currentRows[0].limitsJson, []), features: parseStoredJson<PlanFeature[]>(currentRows[0].featuresJson, []), isActive: Boolean(currentRows[0].isActive) };
-    const after = { name, description, limits, features, isActive };
-    await connection.execute('UPDATE PlatformSubscriptionPlans SET name = ?, description = ?, limitsJson = ?, featuresJson = ?, isActive = ?, updatedByPlatformAdminId = ? WHERE id = ?', [name, description, JSON.stringify(limits), JSON.stringify(features), isActive ? 1 : 0, admin.platformAdminId, planId]);
+    const before = { name: currentRows[0].name, description: currentRows[0].description, monthlyPricePaise: currentRows[0].monthlyPricePaise === null ? null : Number(currentRows[0].monthlyPricePaise), annualPricePaise: currentRows[0].annualPricePaise === null ? null : Number(currentRows[0].annualPricePaise), limits: parseStoredJson<PlanLimit[]>(currentRows[0].limitsJson, []), features: parseStoredJson<PlanFeature[]>(currentRows[0].featuresJson, []), isActive: Boolean(currentRows[0].isActive) };
+    const after = { name, description, monthlyPricePaise, annualPricePaise, limits, features, isActive };
+    await connection.execute('UPDATE PlatformSubscriptionPlans SET name = ?, description = ?, monthlyPricePaise = ?, annualPricePaise = ?, limitsJson = ?, featuresJson = ?, isActive = ?, updatedByPlatformAdminId = ? WHERE id = ?', [name, description, monthlyPricePaise, annualPricePaise, JSON.stringify(limits), JSON.stringify(features), isActive ? 1 : 0, admin.platformAdminId, planId]);
     await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, beforeJson, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'subscription.plan_updated', 'subscription_plan', planId, reason, JSON.stringify(before), JSON.stringify(after)]);
     await connection.commit();
     res.json({ success: true, id: planId, ...after });
@@ -1394,7 +1910,7 @@ app.put('/api/platform/plans/:id', requirePlatformAdmin, async (req, res) => {
   } finally { connection.release(); }
 });
 
-app.put('/api/platform/workspaces/:id/subscription', requirePlatformAdmin, async (req, res) => {
+app.put('/api/platform/workspaces/:id/subscription', requirePlatformPermission('platform.subscriptions.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const { planId, status, currentPeriodStart, currentPeriodEnd, internalNote } = req.body || {};
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
@@ -1425,7 +1941,7 @@ app.put('/api/platform/workspaces/:id/subscription', requirePlatformAdmin, async
   } finally { connection.release(); }
 });
 
-app.get('/api/platform/workspaces', requirePlatformAdmin, async (req, res) => {
+app.get('/api/platform/workspaces', requirePlatformPermission('platform.operations.read'), async (req, res) => {
   const query = String(req.query.q || '').trim().slice(0, 100);
   const status = String(req.query.status || 'all');
   if (!['all', 'onboarding', 'active', 'suspended', 'archived'].includes(status)) return res.status(400).json({ error: 'Choose a valid workspace status.' });
@@ -1452,7 +1968,7 @@ app.get('/api/platform/workspaces', requirePlatformAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/platform/workspaces/:id', requirePlatformAdmin, async (req, res) => {
+app.get('/api/platform/workspaces/:id', requirePlatformPermission('platform.operations.read'), async (req, res) => {
   try {
     const [rows]: any = await pool.execute(
       `SELECT w.id, w.name, w.slug, w.lifecycleStatus, w.statusReason,
@@ -1522,10 +2038,11 @@ app.get('/api/platform/workspaces/:id', requirePlatformAdmin, async (req, res) =
   }
 });
 
-app.post('/api/platform/workspaces', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/workspaces', requirePlatformPermission('platform.workspaces.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const { name, adminName, adminEmail } = req.body || {};
   if (typeof name !== 'string' || name.trim().length < 2 || name.length > 191 || typeof adminName !== 'string' || adminName.trim().length < 2 || adminName.length > 191 || !validEmail(adminEmail)) return res.status(400).json({ error: 'Enter a college name and the first administrator’s name and email.' });
+  if (!(await reserveAccountEmailRateLimit(null, adminEmail, 'college_admin_invitation', req.ip))) return res.status(429).json({ code: 'EMAIL_RATE_LIMITED', error: 'Too many administrator invitation emails were requested. Try again later.' });
   const connection = await pool.getConnection();
   const token = randomBytes(32).toString('base64url');
   try {
@@ -1543,7 +2060,9 @@ app.post('/api/platform/workspaces', requirePlatformAdmin, async (req, res) => {
     await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [randomUUID(), admin.platformAdminId, 'workspace.created', 'workspace', id, 'Provisioned with onboarding status', JSON.stringify({ name: collegeName, initialAdmin: adminEmail.toLowerCase() })]);
     await connection.commit();
-    res.status(201).json({ id, name: collegeName, lifecycleStatus: 'onboarding', inviteUrl: `${req.protocol}://${req.get('host')}/platform-admin?collegeInvite=${encodeURIComponent(token)}` });
+    const inviteUrl = `/platform-admin?collegeInvite=${encodeURIComponent(token)}`;
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: id, recipientEmail: adminEmail.toLowerCase(), recipientName: adminName.trim(), type: 'college_admin_invitation', relatedEntityId: id, heading: `Set up ${collegeName} on TalentEdge`, message: `${adminName.trim()} has been invited to become the first administrator for ${collegeName}.`, actionLabel: 'Set up administrator account', actionUrl: inviteUrl, expiry: 'This invitation link expires in 72 hours.', rateLimitReserved: true });
+    res.status(201).json({ id, name: collegeName, lifecycleStatus: 'onboarding', inviteUrl: `${req.protocol}://${req.get('host')}${inviteUrl}`, delivery });
   } catch (error: any) {
     await connection.rollback();
     console.error('Platform workspace creation failed:', error);
@@ -1551,10 +2070,11 @@ app.post('/api/platform/workspaces', requirePlatformAdmin, async (req, res) => {
   } finally { connection.release(); }
 });
 
-app.post('/api/platform/workspaces/:id/admin-invitations', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/workspaces/:id/admin-invitations', requirePlatformPermission('platform.workspaces.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const email = String(req.body?.email || '').trim().toLowerCase();
   if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid first college administrator email.' });
+  if (!(await reserveAccountEmailRateLimit(req.params.id, email, 'college_admin_invitation', req.ip))) return res.status(429).json({ code: 'EMAIL_RATE_LIMITED', error: 'Too many administrator invitation emails were requested. Try again later.' });
   const token = randomBytes(32).toString('base64url');
   const connection = await pool.getConnection();
   try {
@@ -1572,12 +2092,14 @@ app.post('/api/platform/workspaces/:id/admin-invitations', requirePlatformAdmin,
     await connection.execute('INSERT INTO PlatformWorkspaceAdminInvitations (id, workspaceId, email, tokenHash, invitedByPlatformAdminId, expiresAt) VALUES (?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 72 HOUR))', [invitationId, req.params.id, email, hashToken(token), admin.platformAdminId]);
     await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'workspace.admin_invited', 'workspace', req.params.id, `Administrator invitation created for ${email}; prior pending links for this address were revoked`, JSON.stringify({ invitationId, email })]);
     await connection.commit();
-    res.status(201).json({ invitationId, email, inviteUrl: `${req.protocol}://${req.get('host')}/platform-admin?collegeInvite=${encodeURIComponent(token)}` });
+    const invitePath = `/platform-admin?collegeInvite=${encodeURIComponent(token)}`;
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: req.params.id, recipientEmail: email, type: 'college_admin_invitation', relatedEntityId: invitationId, heading: 'You are invited to manage a TalentEdge workspace', message: 'You have been invited to become a college administrator. Use the secure link to set up your account.', actionLabel: 'Accept administrator invitation', actionUrl: invitePath, expiry: 'This invitation link expires in 72 hours.', rateLimitReserved: true });
+    res.status(201).json({ invitationId, email, inviteUrl: `${req.protocol}://${req.get('host')}${invitePath}`, delivery });
   } catch (error) { await connection.rollback(); console.error('College administrator invitation creation failed:', error); res.status(500).json({ error: 'Could not create this college administrator invitation.' }); }
   finally { connection.release(); }
 });
 
-app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/resend', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/resend', requirePlatformPermission('platform.workspaces.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   if (reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Provide a reason of at least five characters for resending this invitation.' });
@@ -1592,6 +2114,7 @@ app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/resend', 
     if (!invites.length) { await connection.rollback(); return res.status(404).json({ error: 'Administrator invitation not found.' }); }
     if (invites[0].acceptedAt) { await connection.rollback(); return res.status(409).json({ error: 'This invitation has already been accepted. Create a new invitation for another administrator.' }); }
     if (invites[0].revokedAt) { await connection.rollback(); return res.status(409).json({ error: 'This invitation was revoked. Create a new invitation instead.' }); }
+    if (!(await reserveAccountEmailRateLimit(req.params.id, invites[0].email, 'college_admin_invitation', req.ip))) { await connection.rollback(); return res.status(429).json({ code: 'EMAIL_RATE_LIMITED', error: 'Too many administrator invitation emails were requested. Try again later.' }); }
     const [activeAdmins]: any = await connection.execute('SELECT id FROM WorkspaceMemberships WHERE workspaceId = ? AND userId IN (SELECT id FROM Users WHERE email = ?) AND role = \'college_admin\' AND status = \'active\' LIMIT 1', [req.params.id, invites[0].email]);
     if (activeAdmins.length) { await connection.rollback(); return res.status(409).json({ error: 'This person is already an active college administrator.' }); }
     await connection.execute('UPDATE PlatformWorkspaceAdminInvitations SET revokedAt = UTC_TIMESTAMP() WHERE workspaceId = ? AND email = ? AND acceptedAt IS NULL AND revokedAt IS NULL AND expiresAt > UTC_TIMESTAMP()', [req.params.id, invites[0].email]);
@@ -1599,12 +2122,14 @@ app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/resend', 
     await connection.execute('INSERT INTO PlatformWorkspaceAdminInvitations (id, workspaceId, email, tokenHash, invitedByPlatformAdminId, expiresAt) VALUES (?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 72 HOUR))', [newInvitationId, req.params.id, invites[0].email, hashToken(token), admin.platformAdminId]);
     await connection.execute('INSERT INTO PlatformAuditEvents (id, platformAdminId, action, targetType, targetId, reason, beforeJson, afterJson) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [randomUUID(), admin.platformAdminId, 'workspace.admin_invitation_resent', 'workspace', req.params.id, reason, JSON.stringify({ invitationId: invites[0].id, email: invites[0].email }), JSON.stringify({ invitationId: newInvitationId, email: invites[0].email })]);
     await connection.commit();
-    res.json({ invitationId: newInvitationId, email: invites[0].email, inviteUrl: `${req.protocol}://${req.get('host')}/platform-admin?collegeInvite=${encodeURIComponent(token)}` });
+    const invitePath = `/platform-admin?collegeInvite=${encodeURIComponent(token)}`;
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: req.params.id, recipientEmail: invites[0].email, type: 'college_admin_invitation', relatedEntityId: newInvitationId, heading: 'Your TalentEdge administrator invitation was renewed', message: 'A fresh administrator invitation link has been issued for this college workspace.', actionLabel: 'Accept administrator invitation', actionUrl: invitePath, expiry: 'This new link expires in 72 hours. The previous pending link is no longer valid.', rateLimitReserved: true });
+    res.json({ invitationId: newInvitationId, email: invites[0].email, inviteUrl: `${req.protocol}://${req.get('host')}${invitePath}`, delivery });
   } catch (error) { await connection.rollback(); console.error('College administrator invitation resend failed:', error); res.status(500).json({ error: 'Could not resend this college administrator invitation.' }); }
   finally { connection.release(); }
 });
 
-app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/revoke', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/revoke', requirePlatformPermission('platform.workspaces.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   if (reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Provide a reason of at least five characters for revoking this invitation.' });
@@ -1626,7 +2151,7 @@ app.post('/api/platform/workspaces/:id/admin-invitations/:invitationId/revoke', 
   finally { connection.release(); }
 });
 
-app.patch('/api/platform/workspaces/:id/status', requirePlatformAdmin, async (req, res) => {
+app.patch('/api/platform/workspaces/:id/status', requirePlatformPermission('platform.workspaces.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const status = String(req.body?.status || '');
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
@@ -1662,10 +2187,11 @@ app.patch('/api/platform/workspaces/:id/status', requirePlatformAdmin, async (re
   } finally { connection.release(); }
 });
 
-app.post('/api/platform/admin-invitations', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/admin-invitations', requirePlatformPermission('platform.settings.manage'), async (req, res) => {
   const admin = (req as PlatformAuthenticatedRequest).platformAuth!;
   const email = String(req.body?.email || '').trim().toLowerCase();
   if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid platform administrator email.' });
+  if (!(await reserveAccountEmailRateLimit(null, email, 'platform_admin_invitation', req.ip))) return res.status(429).json({ code: 'EMAIL_RATE_LIMITED', error: 'Too many platform invitation emails were requested. Try again later.' });
   const token = randomBytes(32).toString('base64url');
   try {
     const [existing]: any = await pool.execute('SELECT id FROM PlatformAdminAccounts WHERE email = ? LIMIT 1', [email]);
@@ -1679,21 +2205,24 @@ app.post('/api/platform/admin-invitations', requirePlatformAdmin, async (req, re
       await connection.commit();
     } catch (error) { await connection.rollback(); throw error; }
     finally { connection.release(); }
-    res.status(201).json({ inviteUrl: `${req.protocol}://${req.get('host')}/platform-admin?invite=${encodeURIComponent(token)}` });
+    const invitePath = `/platform-admin?invite=${encodeURIComponent(token)}`;
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: null, recipientEmail: email, type: 'platform_admin_invitation', relatedEntityId: email, heading: 'You are invited to administer TalentEdge', message: 'A platform administrator invited you to join the TalentEdge platform operations team.', actionLabel: 'Set up platform account', actionUrl: invitePath, expiry: 'This invitation link expires in 72 hours.', rateLimitReserved: true });
+    res.status(201).json({ inviteUrl: `${req.protocol}://${req.get('host')}${invitePath}`, delivery });
   } catch (error) {
     console.error('Platform administrator invitation failed:', error);
     res.status(500).json({ error: 'Could not create this platform administrator invitation.' });
   }
 });
 
-app.post('/api/platform/admins/:id/mfa-reset', requirePlatformAdmin, async (req, res) => {
+app.post('/api/platform/admins/:id/mfa-reset', requirePlatformPermission('platform.settings.manage'), async (req, res) => {
   const actor = (req as PlatformAuthenticatedRequest).platformAuth!;
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
   if (reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Provide a reason of at least five characters.' });
-  const token = randomBytes(32).toString('base64url');
   try {
     const [targets]: any = await pool.execute('SELECT id, email FROM PlatformAdminAccounts WHERE id = ? AND isActive = 1 LIMIT 1', [req.params.id]);
     if (!targets.length) return res.status(404).json({ error: 'Active platform administrator not found.' });
+    if (!(await reserveAccountEmailRateLimit(null, targets[0].email, 'mfa_reset', req.ip))) return res.status(429).json({ code: 'EMAIL_RATE_LIMITED', error: 'Too many authenticator reset emails were requested. Try again later.' });
+    const token = randomBytes(32).toString('base64url');
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
@@ -1703,7 +2232,9 @@ app.post('/api/platform/admins/:id/mfa-reset', requirePlatformAdmin, async (req,
       await connection.commit();
     } catch (error) { await connection.rollback(); throw error; }
     finally { connection.release(); }
-    res.status(201).json({ email: targets[0].email, inviteUrl: `${req.protocol}://${req.get('host')}/platform-admin?mfaReset=${encodeURIComponent(token)}` });
+    const resetPath = `/platform-admin?mfaReset=${encodeURIComponent(token)}`;
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: null, recipientEmail: targets[0].email, type: 'mfa_reset', relatedEntityId: req.params.id, heading: 'Reset your TalentEdge authenticator', message: `A platform administrator initiated an authenticator reset. Reason: ${reason}`, actionLabel: 'Set up a new authenticator', actionUrl: resetPath, expiry: 'This reset link expires in one hour.', rateLimitReserved: true });
+    res.status(201).json({ email: targets[0].email, inviteUrl: `${req.protocol}://${req.get('host')}${resetPath}`, delivery });
   } catch (error) { console.error('Platform MFA reset creation failed:', error); res.status(500).json({ error: 'Could not create an MFA reset link.' }); }
 });
 
@@ -1743,14 +2274,14 @@ app.post('/api/platform/auth/mfa-resets/complete', async (req, res) => {
   finally { connection.release(); }
 });
 
-app.get('/api/platform/admins', requirePlatformAdmin, async (_req, res) => {
+app.get('/api/platform/admins', requirePlatformPermission('platform.settings.manage'), async (_req, res) => {
   try {
     const [rows]: any = await pool.query('SELECT id, name, email, isActive, DATE_FORMAT(lastLoginAt, \'%Y-%m-%d %H:%i:%s\') AS lastLoginAt, DATE_FORMAT(createdAt, \'%Y-%m-%d %H:%i:%s\') AS createdAt FROM PlatformAdminAccounts ORDER BY isActive DESC, name ASC');
     res.json(rows.map((row: any) => ({ ...row, isActive: Boolean(row.isActive) })));
   } catch (error) { console.error('Platform administrators query failed:', error); res.status(500).json({ error: 'Could not load platform administrators.' }); }
 });
 
-app.patch('/api/platform/admins/:id/status', requirePlatformAdmin, async (req, res) => {
+app.patch('/api/platform/admins/:id/status', requirePlatformPermission('platform.settings.manage'), async (req, res) => {
   const actor = (req as PlatformAuthenticatedRequest).platformAuth!;
   const isActive = req.body?.isActive;
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
@@ -1786,7 +2317,143 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/api/workspace/subscription', requireRole('college_admin'), async (req, res) => {
+function getRazorpayCredentials() {
+  const keyId = process.env.RAZORPAY_KEY_ID || '';
+  const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+  return keyId && keySecret ? { keyId, keySecret } : null;
+}
+
+async function razorpayRequest<T = any>(resource: string, method = 'GET', body?: Record<string, unknown>): Promise<T> {
+  const credentials = getRazorpayCredentials();
+  if (!credentials) throw new Error('Razorpay is not configured. Add server-side API credentials to enable billing.');
+  const response = await fetch(`https://api.razorpay.com/v1${resource}`, {
+    method,
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${credentials.keyId}:${credentials.keySecret}`).toString('base64')}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(12000),
+  });
+  const data: any = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error?.description || `Razorpay request failed (${response.status}).`);
+  return data as T;
+}
+
+function safeHexEqual(expected: string, actual: string) {
+  if (!/^[a-f0-9]{64}$/i.test(actual) || expected.length !== actual.length) return false;
+  return timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(actual, 'hex'));
+}
+
+function isRazorpayInvoiceUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && (url.hostname === 'rzp.io' || url.hostname === 'razorpay.com' || url.hostname.endsWith('.razorpay.com'));
+  } catch { return false; }
+}
+
+function periodEndFrom(start: Date, interval: 'monthly' | 'annual') {
+  const end = new Date(start);
+  if (interval === 'annual') end.setFullYear(end.getFullYear() + 1);
+  else end.setMonth(end.getMonth() + 1);
+  return end;
+}
+
+let billingCancellationWorkerRunning = false;
+async function processBillingCancellationQueue() {
+  if (billingCancellationWorkerRunning || !getRazorpayCredentials()) return;
+  billingCancellationWorkerRunning = true;
+  try {
+    const [rows]: any = await pool.query("SELECT id, providerSubscriptionId FROM WorkspaceBillingCancellationQueue WHERE attempts < 10 AND (status IN ('pending','failed') OR (status = 'processing' AND updatedAt < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 5 MINUTE))) ORDER BY createdAt LIMIT 5");
+    for (const row of rows) {
+      const [claim]: any = await pool.execute("UPDATE WorkspaceBillingCancellationQueue SET status = 'processing' WHERE id = ? AND (status IN ('pending','failed') OR (status = 'processing' AND updatedAt < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 5 MINUTE)))", [row.id]);
+      if (!claim.affectedRows) continue;
+      try {
+        await razorpayRequest(`/subscriptions/${encodeURIComponent(row.providerSubscriptionId)}/cancel`, 'POST', { cancel_at_cycle_end: 1 });
+        await pool.execute("UPDATE WorkspaceBillingCancellationQueue SET status = 'completed', lastError = NULL WHERE id = ?", [row.id]);
+      } catch (error) {
+        await pool.execute("UPDATE WorkspaceBillingCancellationQueue SET status = 'failed', attempts = attempts + 1, lastError = ? WHERE id = ?", [String(error).slice(0, 490), row.id]);
+      }
+    }
+  } catch (error) { console.warn('Billing cancellation queue is not ready:', error); }
+  finally { billingCancellationWorkerRunning = false; }
+}
+const billingCancellationTimer = setInterval(() => { void processBillingCancellationQueue(); }, 30000);
+billingCancellationTimer.unref();
+
+async function saveBillingPayment(attempt: any, subscription: any, payment: any, status: 'paid' | 'failed') {
+  if (!payment?.id) return;
+  const year = new Date().getUTCFullYear();
+  const invoiceNumber = `TE-${year}-${randomUUID().slice(0, 8).toUpperCase()}`;
+  const invoiceId = payment.invoice_id || null;
+  const periodStart = subscription?.current_start ? new Date(Number(subscription.current_start) * 1000) : null;
+  const periodEnd = subscription?.current_end ? new Date(Number(subscription.current_end) * 1000) : null;
+  await pool.execute(
+    `INSERT INTO WorkspaceBillingInvoices
+     (id, invoiceNumber, workspaceId, billingAttemptId, planId, billingInterval, amountPaise, currency, status,
+      providerPaymentId, providerInvoiceId, providerSubscriptionId, invoiceUrl, paymentMethod, issuedAt, periodStart, periodEnd)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?)
+     ON DUPLICATE KEY UPDATE status = IF(VALUES(status) = 'paid', 'paid', status),
+       providerInvoiceId = COALESCE(VALUES(providerInvoiceId), providerInvoiceId), invoiceUrl = COALESCE(VALUES(invoiceUrl), invoiceUrl)`,
+    [randomUUID(), invoiceNumber, attempt.workspaceId, attempt.id, attempt.planId, attempt.billingInterval,
+      Number(payment.amount || attempt.amountPaise), payment.currency || 'INR', status, payment.id, invoiceId,
+      subscription?.id || attempt.providerSubscriptionId, null, payment.method || null, periodStart, periodEnd],
+  );
+}
+
+async function activateBillingAttempt(attemptId: string, providerSubscriptionId: string, paymentId?: string, subscriptionEntity?: any) {
+  const connection = await pool.getConnection();
+  let previousProviderSubscriptionId: string | null = null;
+  let previousCancelAtPeriodEnd = false;
+  let attempt: any;
+  try {
+    await connection.beginTransaction();
+    const [attemptRows]: any = await connection.execute('SELECT * FROM WorkspaceBillingAttempts WHERE id = ? AND providerSubscriptionId = ? FOR UPDATE', [attemptId, providerSubscriptionId]);
+    attempt = attemptRows[0];
+    if (!attempt) { await connection.rollback(); return null; }
+    const [subscriptionRows]: any = await connection.execute('SELECT providerSubscriptionId, cancelAtPeriodEnd FROM WorkspaceSubscriptions WHERE workspaceId = ? FOR UPDATE', [attempt.workspaceId]);
+    previousProviderSubscriptionId = subscriptionRows[0]?.providerSubscriptionId || null;
+    previousCancelAtPeriodEnd = Boolean(subscriptionRows[0]?.cancelAtPeriodEnd);
+    const start = subscriptionEntity?.current_start ? new Date(Number(subscriptionEntity.current_start) * 1000) : new Date();
+    const end = subscriptionEntity?.current_end ? new Date(Number(subscriptionEntity.current_end) * 1000) : periodEndFrom(start, attempt.billingInterval);
+    await connection.execute(
+      `UPDATE WorkspaceSubscriptions SET planId = ?, status = 'active', billingInterval = ?, currency = 'INR',
+       currentPeriodStart = ?, currentPeriodEnd = ?, trialEndsAt = NULL,
+       cancelAtPeriodEnd = IF(providerSubscriptionId = ?, cancelAtPeriodEnd, 0),
+       providerSubscriptionId = ?, pendingBillingAttemptId = NULL WHERE workspaceId = ?`,
+      [attempt.planId, attempt.billingInterval, start, end, providerSubscriptionId, providerSubscriptionId, attempt.workspaceId],
+    );
+    await connection.execute("UPDATE WorkspaceBillingAttempts SET status = 'active', providerPaymentId = COALESCE(?, providerPaymentId) WHERE id = ?", [paymentId || null, attemptId]);
+    await connection.execute("UPDATE WorkspaceBillingAttempts SET status = 'superseded' WHERE workspaceId = ? AND id <> ? AND status IN ('creating','created','authenticated')", [attempt.workspaceId, attemptId]);
+    if (previousProviderSubscriptionId && previousProviderSubscriptionId !== providerSubscriptionId && !previousCancelAtPeriodEnd) {
+      await connection.execute('INSERT IGNORE INTO WorkspaceBillingCancellationQueue (id, workspaceId, providerSubscriptionId) VALUES (?, ?, ?)', [randomUUID(), attempt.workspaceId, previousProviderSubscriptionId]);
+    }
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally { connection.release(); }
+  if (previousProviderSubscriptionId && previousProviderSubscriptionId !== providerSubscriptionId && !previousCancelAtPeriodEnd) void processBillingCancellationQueue();
+  return attempt;
+}
+
+async function schedulePreviousSubscriptionEnd(workspaceId: string, replacementSubscriptionId: string) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [[current]]: any = await connection.execute('SELECT providerSubscriptionId, cancelAtPeriodEnd FROM WorkspaceSubscriptions WHERE workspaceId = ? FOR UPDATE', [workspaceId]);
+    if (current?.providerSubscriptionId && current.providerSubscriptionId !== replacementSubscriptionId && !current.cancelAtPeriodEnd) {
+      await connection.execute('INSERT IGNORE INTO WorkspaceBillingCancellationQueue (id, workspaceId, providerSubscriptionId) VALUES (?, ?, ?)', [randomUUID(), workspaceId, current.providerSubscriptionId]);
+      await connection.execute('UPDATE WorkspaceSubscriptions SET cancelAtPeriodEnd = 1 WHERE workspaceId = ?', [workspaceId]);
+    }
+    await connection.commit();
+  } catch (error) { await connection.rollback(); throw error; }
+  finally { connection.release(); }
+  void processBillingCancellationQueue();
+}
+
+app.get('/api/workspace/subscription', requireWorkspacePermission('subscription.read'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [subscriptionRows]: any = await pool.execute(
@@ -1839,7 +2506,7 @@ app.get('/api/workspace/subscription', requireRole('college_admin'), async (req,
         pendingTrainerInvitations: Number(memberRows[0]?.pendingTrainerInvitations || 0),
         activeBatches: Number(batchRows[0]?.activeBatches || 0),
         aiCreditsUsed: Number(aiRows[0]?.creditsUsed || 0),
-        aiCreditsTracked: Boolean(process.env.GEMINI_API_KEY),
+        aiCreditsTracked: process.env.AI_EXTERNAL_PROCESSING_ENABLED === 'true' && Boolean(process.env.GEMINI_API_KEY),
         aiUsagePeriodStart: usagePeriodStart,
       },
     };
@@ -1850,7 +2517,187 @@ app.get('/api/workspace/subscription', requireRole('college_admin'), async (req,
   }
 });
 
-app.get('/api/workspace/settings', requireRole('college_admin'), async (req, res) => {
+app.get('/api/workspace/billing/plans', requireWorkspacePermission('subscription.read'), async (_req, res) => {
+  try {
+    const [rows]: any = await pool.query('SELECT id, name, description, monthlyPricePaise, annualPricePaise FROM PlatformSubscriptionPlans WHERE isActive = 1 ORDER BY FIELD(id, \'pilot\', \'campus\', \'campus_plus\')');
+    res.json(rows.map((row: any) => ({ id: row.id, name: row.name, description: row.description, monthlyPricePaise: row.monthlyPricePaise === null ? null : Number(row.monthlyPricePaise), annualPricePaise: row.annualPricePaise === null ? null : Number(row.annualPricePaise), currency: 'INR' })));
+  } catch (error) { console.error('Billing plan catalog query failed:', error); res.status(503).json({ error: 'Apply the billing database migration to enable self-service plan selection.' }); }
+});
+
+app.get('/api/workspace/billing/invoices', requireWorkspacePermission('billing.manage'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [rows]: any = await pool.execute(
+      `SELECT i.id, i.invoiceNumber, i.planId, COALESCE(p.name, i.planId) AS planName, i.amountPaise, i.currency, i.status,
+       i.providerPaymentId, i.providerInvoiceId, i.invoiceUrl, i.paymentMethod,
+       DATE_FORMAT(i.issuedAt, '%Y-%m-%d %H:%i:%s') AS issuedAt,
+       DATE_FORMAT(i.periodStart, '%Y-%m-%d') AS periodStart, DATE_FORMAT(i.periodEnd, '%Y-%m-%d') AS periodEnd
+       FROM WorkspaceBillingInvoices i LEFT JOIN PlatformSubscriptionPlans p ON p.id = i.planId
+       WHERE i.workspaceId = ? ORDER BY i.issuedAt DESC LIMIT 100`, [auth.workspaceId],
+    );
+    res.json(rows.map((row: any) => ({ ...row, amountPaise: Number(row.amountPaise) })));
+  } catch (error) { console.error('Workspace billing history query failed:', error); res.status(503).json({ error: 'Apply the billing database migration to enable billing history.' }); }
+});
+
+app.get('/api/workspace/billing/invoices/:id/view', requireWorkspacePermission('billing.manage'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [[invoice]]: any = await pool.execute('SELECT providerInvoiceId, invoiceUrl FROM WorkspaceBillingInvoices WHERE id = ? AND workspaceId = ? LIMIT 1', [req.params.id, auth.workspaceId]);
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found.' });
+    if (isRazorpayInvoiceUrl(invoice.invoiceUrl)) return res.redirect(302, invoice.invoiceUrl);
+    if (!invoice.providerInvoiceId) return res.status(404).json({ error: 'The payment provider has not issued a hosted invoice for this payment.' });
+    const providerInvoice: any = await razorpayRequest(`/invoices/${encodeURIComponent(invoice.providerInvoiceId)}`);
+    const invoiceUrl = isRazorpayInvoiceUrl(providerInvoice.short_url) ? providerInvoice.short_url : null;
+    if (!invoiceUrl) return res.status(404).json({ error: 'The payment provider invoice link is not available.' });
+    await pool.execute('UPDATE WorkspaceBillingInvoices SET invoiceUrl = ? WHERE id = ? AND workspaceId = ?', [invoiceUrl, req.params.id, auth.workspaceId]);
+    res.redirect(302, invoiceUrl);
+  } catch (error) { console.error('Hosted billing invoice lookup failed:', error); res.status(502).json({ error: 'Could not open the payment provider invoice.' }); }
+});
+
+app.post('/api/workspace/billing/checkout', requireWorkspacePermission('subscription.manage'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const planId = req.body?.planId;
+  const interval = req.body?.interval;
+  if (!['pilot', 'campus', 'campus_plus'].includes(planId) || !['monthly', 'annual'].includes(interval)) return res.status(400).json({ error: 'Choose an available plan and monthly or annual billing.' });
+  if (!getRazorpayCredentials()) return res.status(503).json({ error: 'Billing is not enabled. Configure Razorpay API credentials on the server.' });
+  const attemptId = randomUUID();
+  try {
+    const [plans]: any = await pool.execute('SELECT id, name, monthlyPricePaise, annualPricePaise FROM PlatformSubscriptionPlans WHERE id = ? AND isActive = 1 LIMIT 1', [planId]);
+    if (!plans.length) return res.status(400).json({ error: 'That plan is not available.' });
+    const amountPaise = Number(interval === 'monthly' ? plans[0].monthlyPricePaise : plans[0].annualPricePaise);
+    if (!Number.isSafeInteger(amountPaise) || amountPaise < 100) return res.status(409).json({ error: 'This plan does not have a valid price configured yet.' });
+    const [[currentSubscription]]: any = await pool.execute('SELECT providerSubscriptionId, status, currentPeriodEnd FROM WorkspaceSubscriptions WHERE workspaceId = ? LIMIT 1', [auth.workspaceId]);
+    const effectiveAt = currentSubscription?.providerSubscriptionId && ['active', 'past_due'].includes(currentSubscription.status)
+      && currentSubscription.currentPeriodEnd && new Date(currentSubscription.currentPeriodEnd).getTime() > Date.now()
+      ? new Date(currentSubscription.currentPeriodEnd) : null;
+    await pool.execute(
+      `INSERT INTO WorkspaceBillingAttempts (id, workspaceId, requestedByUserId, planId, billingInterval, amountPaise)
+       VALUES (?, ?, ?, ?, ?, ?)`, [attemptId, auth.workspaceId, auth.userId, planId, interval, amountPaise],
+    );
+    let [catalog]: any = await pool.execute('SELECT providerPlanId, amountPaise FROM RazorpayPlanCatalog WHERE planId = ? AND billingInterval = ? LIMIT 1', [planId, interval]);
+    if (!catalog.length || Number(catalog[0].amountPaise) !== amountPaise) {
+      const providerPlan: any = await razorpayRequest('/plans', 'POST', {
+        period: interval === 'annual' ? 'yearly' : 'monthly', interval: 1,
+        item: { name: `${plans[0].name} (${interval})`, amount: amountPaise, currency: 'INR', description: `TalentEdge ${plans[0].name} subscription` },
+        notes: { talentedgePlanId: planId, billingInterval: interval },
+      });
+      await pool.execute(
+        `INSERT INTO RazorpayPlanCatalog (planId, billingInterval, amountPaise, providerPlanId) VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE amountPaise = VALUES(amountPaise), providerPlanId = VALUES(providerPlanId)`,
+        [planId, interval, amountPaise, providerPlan.id],
+      );
+      catalog = [{ providerPlanId: providerPlan.id }];
+    }
+    const providerSubscription: any = await razorpayRequest('/subscriptions', 'POST', {
+      plan_id: catalog[0].providerPlanId, total_count: 100, quantity: 1, customer_notify: 1,
+      ...(effectiveAt ? { start_at: Math.floor(effectiveAt.getTime() / 1000) } : {}),
+      notes: { talentedgeWorkspaceId: auth.workspaceId, talentedgeBillingAttemptId: attemptId },
+    });
+    await pool.execute("UPDATE WorkspaceBillingAttempts SET status = 'created', providerPlanId = ?, providerSubscriptionId = ? WHERE id = ?", [catalog[0].providerPlanId, providerSubscription.id, attemptId]);
+    await pool.execute('UPDATE WorkspaceSubscriptions SET pendingBillingAttemptId = ? WHERE workspaceId = ?', [attemptId, auth.workspaceId]);
+    res.json({ attemptId, subscriptionId: providerSubscription.id, keyId: getRazorpayCredentials()!.keyId, name: 'TalentEdge', description: `${plans[0].name} · ${interval}`, amountPaise, currency: 'INR', planName: plans[0].name, interval, effectiveAt: effectiveAt?.toISOString() || null });
+  } catch (error) {
+    await pool.execute("UPDATE WorkspaceBillingAttempts SET status = 'failed' WHERE id = ?", [attemptId]).catch(() => undefined);
+    await pool.execute('UPDATE WorkspaceSubscriptions SET pendingBillingAttemptId = NULL WHERE workspaceId = ? AND pendingBillingAttemptId = ?', [auth.workspaceId, attemptId]).catch(() => undefined);
+    console.error('Razorpay subscription checkout creation failed:', error);
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Could not create a billing checkout.' });
+  }
+});
+
+app.post('/api/workspace/billing/confirm', requireWorkspacePermission('subscription.manage'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const { attemptId, subscriptionId, paymentId, signature } = req.body || {};
+  if (![attemptId, subscriptionId, paymentId, signature].every((value) => typeof value === 'string' && value.length > 0)) return res.status(400).json({ error: 'The payment confirmation is incomplete.' });
+  const credentials = getRazorpayCredentials();
+  if (!credentials) return res.status(503).json({ error: 'Billing is not configured.' });
+  try {
+    const [attemptRows]: any = await pool.execute('SELECT * FROM WorkspaceBillingAttempts WHERE id = ? AND workspaceId = ? AND providerSubscriptionId = ? LIMIT 1', [attemptId, auth.workspaceId, subscriptionId]);
+    const attempt = attemptRows[0];
+    if (!attempt) return res.status(404).json({ error: 'Billing attempt not found.' });
+    const expected = createHmac('sha256', credentials.keySecret).update(`${paymentId}|${subscriptionId}`).digest('hex');
+    if (!safeHexEqual(expected, signature)) return res.status(400).json({ error: 'The payment signature could not be verified.' });
+    const payment: any = await razorpayRequest(`/payments/${encodeURIComponent(paymentId)}`);
+    if (payment.subscription_id !== subscriptionId || !['authorized', 'captured'].includes(payment.status)) return res.status(409).json({ error: 'Razorpay has not authorized this subscription payment.' });
+    const providerSubscription: any = await razorpayRequest(`/subscriptions/${encodeURIComponent(subscriptionId)}`);
+    await pool.execute("UPDATE WorkspaceBillingAttempts SET status = 'authenticated', providerPaymentId = ? WHERE id = ? AND status <> 'active'", [paymentId, attemptId]);
+    if (providerSubscription.start_at && Number(providerSubscription.start_at) * 1000 > Date.now()) await schedulePreviousSubscriptionEnd(auth.workspaceId, subscriptionId);
+    if (providerSubscription.status === 'active') {
+      const activated = await activateBillingAttempt(attemptId, subscriptionId, paymentId, providerSubscription);
+      if (activated && payment.status === 'captured') await saveBillingPayment(activated, providerSubscription, payment, 'paid');
+      return res.json({ success: true, status: 'active', message: 'Subscription activated.' });
+    }
+    return res.json({ success: true, status: providerSubscription.status || 'authenticated', message: 'Payment method authorized. Subscription activation will be confirmed by Razorpay.' });
+  } catch (error) {
+    console.error('Razorpay checkout confirmation failed:', error);
+    res.status(502).json({ error: error instanceof Error ? error.message : 'Could not confirm the subscription.' });
+  }
+});
+
+app.post('/api/workspace/billing/cancel', requireWorkspacePermission('subscription.manage'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [rows]: any = await pool.execute('SELECT providerSubscriptionId, status FROM WorkspaceSubscriptions WHERE workspaceId = ? LIMIT 1', [auth.workspaceId]);
+    const providerSubscriptionId = rows[0]?.providerSubscriptionId;
+    if (!providerSubscriptionId || !['active', 'past_due'].includes(rows[0]?.status)) return res.status(409).json({ error: 'There is no active provider subscription to cancel.' });
+    await razorpayRequest(`/subscriptions/${encodeURIComponent(providerSubscriptionId)}/cancel`, 'POST', { cancel_at_cycle_end: 1 });
+    await pool.execute('UPDATE WorkspaceSubscriptions SET cancelAtPeriodEnd = 1 WHERE workspaceId = ?', [auth.workspaceId]);
+    res.json({ success: true, cancelAtPeriodEnd: true });
+  } catch (error) { console.error('Razorpay cancellation request failed:', error); res.status(502).json({ error: error instanceof Error ? error.message : 'Could not schedule cancellation.' }); }
+});
+
+app.post('/api/billing/razorpay/webhook', async (req: any, res) => {
+  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+  if (!webhookSecret || !Buffer.isBuffer(req.rawBody)) return res.status(503).json({ error: 'Billing webhook is not configured.' });
+  const signature = String(req.get('x-razorpay-signature') || '');
+  const expected = createHmac('sha256', webhookSecret).update(req.rawBody).digest('hex');
+  if (!safeHexEqual(expected, signature)) return res.status(400).json({ error: 'Invalid webhook signature.' });
+  const eventType = req.body?.event;
+  const eventId = String(req.get('x-razorpay-event-id') || createHash('sha256').update(req.rawBody).digest('hex'));
+  const event = req.body?.payload || {};
+  const sub = event.subscription?.entity || {};
+  const payment = event.payment?.entity || {};
+  const attemptId = sub.notes?.talentedgeBillingAttemptId || null;
+  const subscriptionId = sub.id || payment.subscription_id || null;
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await connection.execute('INSERT IGNORE INTO WorkspaceBillingWebhookEvents (providerEventId, eventType) VALUES (?, ?)', [eventId, String(eventType || 'unknown')]);
+    const [eventRows]: any = await connection.execute('SELECT processedAt, processingAt FROM WorkspaceBillingWebhookEvents WHERE providerEventId = ? FOR UPDATE', [eventId]);
+    if (eventRows[0]?.processedAt || (eventRows[0]?.processingAt && Date.now() - new Date(eventRows[0].processingAt).getTime() < 5 * 60 * 1000)) { await connection.commit(); return res.json({ received: true, duplicate: true }); }
+    await connection.execute('UPDATE WorkspaceBillingWebhookEvents SET processingAt = UTC_TIMESTAMP() WHERE providerEventId = ?', [eventId]);
+    await connection.commit();
+    let [attemptRows]: any = await pool.execute('SELECT * FROM WorkspaceBillingAttempts WHERE providerSubscriptionId = ? OR id = ? ORDER BY createdAt DESC LIMIT 1', [subscriptionId, attemptId || '']);
+    let attempt = attemptRows[0];
+    if (attempt && !attempt.providerSubscriptionId && subscriptionId) {
+      await pool.execute("UPDATE WorkspaceBillingAttempts SET providerSubscriptionId = ?, status = 'created' WHERE id = ? AND providerSubscriptionId IS NULL", [subscriptionId, attempt.id]);
+      attempt.providerSubscriptionId = subscriptionId;
+    }
+    if (attempt && eventType === 'subscription.authenticated') await schedulePreviousSubscriptionEnd(attempt.workspaceId, subscriptionId);
+    if (attempt && ['subscription.activated', 'subscription.charged'].includes(eventType)) {
+      attempt = await activateBillingAttempt(attempt.id, attempt.providerSubscriptionId || subscriptionId, payment.id, sub);
+    } else if (attempt && ['subscription.pending', 'subscription.halted'].includes(eventType)) {
+      await pool.execute("UPDATE WorkspaceSubscriptions SET status = 'past_due' WHERE workspaceId = ? AND providerSubscriptionId = ?", [attempt.workspaceId, subscriptionId]);
+    } else if (attempt && eventType === 'subscription.resumed') {
+      await pool.execute("UPDATE WorkspaceSubscriptions SET status = 'active', cancelAtPeriodEnd = 0 WHERE workspaceId = ? AND providerSubscriptionId = ?", [attempt.workspaceId, subscriptionId]);
+    } else if (attempt && ['subscription.cancelled', 'subscription.canceled', 'subscription.completed'].includes(eventType)) {
+      await pool.execute("UPDATE WorkspaceSubscriptions SET status = 'canceled', cancelAtPeriodEnd = 0 WHERE workspaceId = ? AND providerSubscriptionId = ?", [attempt.workspaceId, subscriptionId]);
+    }
+    if (attempt && payment.id && ['subscription.charged', 'payment.captured'].includes(eventType)) await saveBillingPayment(attempt, sub, payment, 'paid');
+    if (attempt && payment.id && eventType === 'payment.failed') {
+      await saveBillingPayment(attempt, sub, payment, 'failed');
+      await pool.execute("UPDATE WorkspaceSubscriptions SET status = 'past_due' WHERE workspaceId = ? AND providerSubscriptionId = ?", [attempt.workspaceId, subscriptionId]);
+    }
+    await pool.execute('UPDATE WorkspaceBillingWebhookEvents SET processedAt = UTC_TIMESTAMP(), processingAt = NULL, processingError = NULL WHERE providerEventId = ?', [eventId]);
+    res.json({ received: true });
+  } catch (error) {
+    await connection.rollback().catch(() => undefined);
+    console.error('Razorpay webhook processing failed:', error);
+    await pool.execute('UPDATE WorkspaceBillingWebhookEvents SET processingAt = NULL, processingError = ? WHERE providerEventId = ?', [String(error).slice(0, 490), eventId]).catch(() => undefined);
+    res.status(500).json({ error: 'Webhook processing failed; provider may retry.' });
+  } finally { connection.release(); }
+});
+
+app.get('/api/workspace/settings', requireWorkspacePermission('workspace.configure'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute('SELECT settingsJson FROM WorkspaceSettings WHERE workspaceId = ? LIMIT 1', [auth.workspaceId]);
@@ -1862,7 +2709,7 @@ app.get('/api/workspace/settings', requireRole('college_admin'), async (req, res
   }
 });
 
-app.put('/api/workspace/settings', requireRole('college_admin'), async (req, res) => {
+app.put('/api/workspace/settings', requireWorkspacePermission('workspace.configure'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { atRiskBelow, tierOneAtOrAbove, defaultInterviewDurationMinutes } = req.body || {};
   if (!Number.isInteger(atRiskBelow) || atRiskBelow < 0 || atRiskBelow > 99
@@ -1964,7 +2811,7 @@ async function createPanelistScheduleNotification(db: any, workspaceId: string, 
   );
 }
 
-app.get('/api/interview-panelists', requireRole('college_admin'), async (req, res) => {
+app.get('/api/interview-panelists', requireWorkspacePermission('interview.schedule_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -1981,7 +2828,7 @@ app.get('/api/interview-panelists', requireRole('college_admin'), async (req, re
   }
 });
 
-app.post('/api/interview-panelists', requireRole('college_admin'), async (req, res) => {
+app.post('/api/interview-panelists', requireWorkspacePermission('interview.schedule_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { name, email = '', designation = '', specialties = '' } = req.body || {};
   if (typeof name !== 'string' || name.trim().length < 2 || name.length > 191
@@ -2013,7 +2860,7 @@ app.post('/api/interview-panelists', requireRole('college_admin'), async (req, r
   }
 });
 
-app.patch('/api/interview-panelists/:id', requireRole('college_admin'), async (req, res) => {
+app.patch('/api/interview-panelists/:id', requireWorkspacePermission('interview.schedule_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { id } = req.params;
   const { name, email, designation, specialties, isActive } = req.body || {};
@@ -2071,7 +2918,7 @@ app.patch('/api/interview-panelists/:id', requireRole('college_admin'), async (r
   }
 });
 
-app.get('/api/interview-schedules', requireRole('college_admin'), async (req, res) => {
+app.get('/api/interview-schedules', requireWorkspacePermission('interview.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2099,7 +2946,7 @@ app.get('/api/interview-schedules', requireRole('college_admin'), async (req, re
   }
 });
 
-app.put('/api/interview-schedules/:id/follow-up', requireRole('college_admin'), async (req, res) => {
+app.put('/api/interview-schedules/:id/follow-up', requireWorkspacePermission('interview.schedule_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const outcome = String(req.body?.outcome || '');
   const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
@@ -2166,7 +3013,7 @@ app.put('/api/interview-schedules/:id/follow-up', requireRole('college_admin'), 
   }
 });
 
-app.get('/api/interview-follow-ups/mine', requireRole('student'), async (req, res) => {
+app.get('/api/interview-follow-ups/mine', requireWorkspacePermission('interview.read_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2187,7 +3034,7 @@ app.get('/api/interview-follow-ups/mine', requireRole('student'), async (req, re
   }
 });
 
-app.get('/api/interview-follow-ups/:scheduleId/history', requireRole('college_admin'), async (req, res) => {
+app.get('/api/interview-follow-ups/:scheduleId/history', requireWorkspacePermission('interview.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2206,7 +3053,7 @@ app.get('/api/interview-follow-ups/:scheduleId/history', requireRole('college_ad
   }
 });
 
-app.get('/api/interview-schedules/mine', requireRole('student'), async (req, res) => {
+app.get('/api/interview-schedules/mine', requireWorkspacePermission('interview.read_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2224,7 +3071,7 @@ app.get('/api/interview-schedules/mine', requireRole('student'), async (req, res
   }
 });
 
-app.get('/api/interview-schedules/assigned', requireRole('panelist'), async (req, res) => {
+app.get('/api/interview-schedules/assigned', requireWorkspacePermission('interview.panelist.read_assigned'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2247,7 +3094,7 @@ app.get('/api/interview-schedules/assigned', requireRole('panelist'), async (req
   }
 });
 
-app.get('/api/interview-schedules/:id/evaluation', requireRole('college_admin'), async (req, res) => {
+app.get('/api/interview-schedules/:id/evaluation', requireWorkspacePermission('interview.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2273,7 +3120,7 @@ app.get('/api/interview-schedules/:id/evaluation', requireRole('college_admin'),
   }
 });
 
-app.post('/api/interview-schedules/:id/evaluation', requireRole('panelist'), async (req, res) => {
+app.post('/api/interview-schedules/:id/evaluation', requireWorkspacePermission('interview.panelist.evaluate_assigned'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { ratings, remarks, recommendation } = req.body || {};
   if (!ratings || typeof ratings !== 'object' || Array.isArray(ratings)
@@ -2312,8 +3159,9 @@ app.post('/api/interview-schedules/:id/evaluation', requireRole('panelist'), asy
     const profile = profiles[0];
     const techInterview = schedule.interviewType === 'tech' ? score : Number(profile.techInterview);
     const hrInterview = schedule.interviewType === 'hr' ? score : Number(profile.hrInterview);
-    const overallReadiness = Math.round(Number(profile.coding) * 0.25 + Number(profile.aptitude) * 0.15 + Number(profile.reasoning) * 0.1
-      + Number(profile.sqlScore) * 0.1 + Number(profile.csFundamentals) * 0.1 + Number(profile.communication) * 0.1 + techInterview * 0.1 + hrInterview * 0.1);
+    const overallReadiness = explainReadiness({ coding: profile.coding, aptitude: profile.aptitude, reasoning: profile.reasoning,
+      sql: profile.sqlScore, csFundamentals: profile.csFundamentals, communication: profile.communication,
+      techInterview, hrInterview }).score;
     const remark = { id: `interview-${schedule.id}`, trainerName: auth.name, date: new Date().toISOString().slice(0, 10), comment: remarks.trim(), type: schedule.interviewType, score };
     let recentRemarks: any[] = [];
     try { recentRemarks = JSON.parse(profile.recentRemarksJson || '[]'); if (!Array.isArray(recentRemarks)) recentRemarks = []; } catch { recentRemarks = []; }
@@ -2350,7 +3198,7 @@ app.post('/api/interview-schedules/:id/evaluation', requireRole('panelist'), asy
   } finally { connection.release(); }
 });
 
-app.post('/api/interview-schedules', requireRole('college_admin'), async (req, res) => {
+app.post('/api/interview-schedules', requireWorkspacePermission('interview.schedule_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const scheduledAt = validInterviewScheduleInput(req.body);
   if (!scheduledAt || !isFutureScheduleDate(scheduledAt)) return res.status(400).json({ error: 'Choose a valid future interview time, student, panelist, and duration.' });
@@ -2389,7 +3237,7 @@ app.post('/api/interview-schedules', requireRole('college_admin'), async (req, r
   } finally { connection.release(); }
 });
 
-app.patch('/api/interview-schedules/:id', requireRole('college_admin'), async (req, res) => {
+app.patch('/api/interview-schedules/:id', requireWorkspacePermission('interview.schedule_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { status } = req.body || {};
   if (status === 'cancelled') {
@@ -2470,7 +3318,7 @@ app.patch('/api/interview-schedules/:id', requireRole('college_admin'), async (r
     res.status(500).json({ error: 'Could not update the interview schedule.' });
   } finally { connection.release(); }
 });
-app.get('/api/workspace/members', requireRole('college_admin'), async (req, res) => {
+app.get('/api/workspace/members', requireWorkspacePermission('members.read'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2488,7 +3336,7 @@ app.get('/api/workspace/members', requireRole('college_admin'), async (req, res)
   }
 });
 
-app.patch('/api/workspace/members/:id', requireRole('college_admin'), async (req, res) => {
+app.patch('/api/workspace/members/:id', requireWorkspacePermission('members.change_role'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { id } = req.params;
   const { role, batchId } = req.body || {};
@@ -2575,7 +3423,7 @@ app.patch('/api/workspace/members/:id', requireRole('college_admin'), async (req
   }
 });
 
-app.get('/api/workspace/trainers', requireRole('college_admin'), async (req, res) => {
+app.get('/api/workspace/trainers', requireWorkspacePermission('members.read'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2590,7 +3438,7 @@ app.get('/api/workspace/trainers', requireRole('college_admin'), async (req, res
   }
 });
 
-app.patch('/api/workspace/students/:id', requireRole('college_admin'), async (req, res) => {
+app.patch('/api/workspace/students/:id', requireWorkspacePermission('students.update_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { id } = req.params;
   const { batchId, rollNo, phone, department, branch } = req.body || {};
@@ -2630,34 +3478,52 @@ app.patch('/api/workspace/students/:id', requireRole('college_admin'), async (re
   }
 });
 
-app.post('/api/workspace/members/:id/password-reset', requireRole('college_admin'), async (req, res) => {
+app.post('/api/workspace/members/:id/password-reset', requireWorkspacePermission('members.password_reset'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { id } = req.params;
   if (id === auth.userId) return res.status(400).json({ error: 'Use the account password change option for your own account.' });
   try {
     const [members]: any = await pool.execute(
-      `SELECT userId FROM WorkspaceMemberships WHERE workspaceId = ? AND userId = ? AND status = 'active'`,
+      `SELECT u.id AS userId, u.name, u.email FROM WorkspaceMemberships m JOIN Users u ON u.id = m.userId
+       WHERE m.workspaceId = ? AND m.userId = ? AND m.status = 'active'`,
       [auth.workspaceId, id],
     );
     if (!members.length) return res.status(404).json({ error: 'Active workspace member not found.' });
+    if (!(await reserveAccountEmailRateLimit(auth.workspaceId, members[0].email, 'password_reset', req.ip))) return res.status(429).json({ code: 'EMAIL_RATE_LIMITED', error: 'Too many account emails were requested. Try again later.' });
     const token = randomBytes(32).toString('base64url');
+    const resetId = randomUUID();
     await pool.execute(
       `INSERT INTO WorkspacePasswordResets (id, workspaceId, userId, tokenHash, expiresAt, createdByUserId)
        VALUES (?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 1 HOUR), ?)`,
-      [randomUUID(), auth.workspaceId, id, hashToken(token), auth.userId],
+      [resetId, auth.workspaceId, id, hashToken(token), auth.userId],
     );
     await pool.execute(
       'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, targetUserId) VALUES (?, ?, ?, ?, ?)',
       [randomUUID(), auth.workspaceId, auth.userId, 'member.password_reset_link_created', id],
     );
-    res.status(201).json({ success: true, resetPath: `/?reset=${encodeURIComponent(token)}`, expiresInMinutes: 60 });
+    const resetPath = `/?reset=${encodeURIComponent(token)}`;
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: auth.workspaceId, recipientEmail: members[0].email, recipientName: members[0].name, type: 'password_reset', relatedEntityId: resetId, heading: 'Reset your TalentEdge password', message: 'A college administrator requested a password reset for your account.', actionLabel: 'Reset password', actionUrl: resetPath, expiry: 'This one-time link expires in 60 minutes.', rateLimitReserved: true });
+    res.status(201).json({ success: true, resetPath, expiresInMinutes: 60, delivery });
   } catch (error) {
     console.error('Password reset link creation failed:', error);
     res.status(500).json({ error: 'Could not create a password reset link.' });
   }
 });
 
-app.get('/api/workspace/audit', requireRole('college_admin'), async (req, res) => {
+app.get('/api/workspace/email-deliveries', requireWorkspacePermission('audit.read'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [rows]: any = await pool.execute(
+      `SELECT id, recipientEmail, deliveryType, relatedEntityId, status, lastError,
+       DATE_FORMAT(requestedAt, '%Y-%m-%d %H:%i:%s') AS requestedAt,
+       DATE_FORMAT(sentAt, '%Y-%m-%d %H:%i:%s') AS sentAt
+       FROM AccountEmailDeliveries WHERE workspaceId = ? ORDER BY requestedAt DESC LIMIT 50`, [auth.workspaceId],
+    );
+    res.json(rows);
+  } catch (error) { console.error('Workspace email delivery history failed:', error); res.status(503).json({ error: 'Apply the account email migration to view delivery history.' }); }
+});
+
+app.get('/api/workspace/audit', requireWorkspacePermission('audit.read'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -2673,7 +3539,7 @@ app.get('/api/workspace/audit', requireRole('college_admin'), async (req, res) =
   }
 });
 
-app.patch('/api/workspace/members/:id/status', requireRole('college_admin'), async (req, res) => {
+app.patch('/api/workspace/members/:id/status', requireWorkspacePermission('members.change_status'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { id } = req.params;
   const { status } = req.body || {};
@@ -2684,7 +3550,7 @@ app.patch('/api/workspace/members/:id/status', requireRole('college_admin'), asy
     await connection.beginTransaction();
     await connection.execute('SELECT id FROM Workspaces WHERE id = ? FOR UPDATE', [auth.workspaceId]);
     const [rows]: any = await connection.execute(
-      'SELECT userId, role, status FROM WorkspaceMemberships WHERE workspaceId = ? AND userId = ? FOR UPDATE',
+      'SELECT m.userId, m.role, m.status, u.name, u.email FROM WorkspaceMemberships m JOIN Users u ON u.id = m.userId WHERE m.workspaceId = ? AND m.userId = ? FOR UPDATE',
       [auth.workspaceId, id],
     );
     const member = rows[0];
@@ -2717,7 +3583,8 @@ app.patch('/api/workspace/members/:id/status', requireRole('college_admin'), asy
       [randomUUID(), auth.workspaceId, auth.userId, status === 'inactive' ? 'member.deactivated' : 'member.reactivated', id, JSON.stringify({ role: member.role })],
     );
     await connection.commit();
-    res.json({ success: true });
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: auth.workspaceId, recipientEmail: member.email, recipientName: member.name, type: 'account_notice', relatedEntityId: id, heading: status === 'inactive' ? 'Workspace access paused' : 'Workspace access restored', message: status === 'inactive' ? 'Your college workspace access has been paused by an administrator. Contact your college administrator if you believe this was a mistake.' : 'Your college workspace access has been restored. You can sign in with your existing account.' });
+    res.json({ success: true, delivery });
   } catch (error) {
     await connection.rollback();
     console.error('Member status update failed:', error);
@@ -2727,7 +3594,7 @@ app.patch('/api/workspace/members/:id/status', requireRole('college_admin'), asy
   }
 });
 
-app.post('/api/workspace/invitations', requireRole('college_admin'), async (req, res) => {
+app.post('/api/workspace/invitations', requireWorkspacePermission('members.invite'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { email, role, batchId } = req.body || {};
   if (!validEmail(email) || !['college_admin', 'trainer', 'student', 'panelist'].includes(role)) {
@@ -2735,6 +3602,8 @@ app.post('/api/workspace/invitations', requireRole('college_admin'), async (req,
   }
   if (role === 'student' && batchId !== undefined && batchId !== null && typeof batchId !== 'string') return res.status(400).json({ error: 'Batch selection is invalid.' });
   if (role !== 'student' && batchId) return res.status(400).json({ error: 'Only student invitations can be assigned to a batch.' });
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!(await reserveAccountEmailRateLimit(auth.workspaceId, normalizedEmail, 'workspace_invitation', req.ip))) return res.status(429).json({ code: 'EMAIL_RATE_LIMITED', error: 'Too many invitation emails were requested. Try again later.' });
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
@@ -2752,17 +3621,20 @@ app.post('/api/workspace/invitations', requireRole('college_admin'), async (req,
       if (!batches.length) { await connection.rollback(); return res.status(400).json({ error: 'Choose a batch in this workspace.' }); }
     }
     const token = randomBytes(32).toString('base64url');
+    const invitationId = randomUUID();
     await connection.execute(
       `INSERT INTO WorkspaceInvitations (id, workspaceId, email, role, batchId, tokenHash, invitedByUserId, expiresAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 7 DAY))`,
-      [randomUUID(), auth.workspaceId, email.toLowerCase(), role, batchId || null, hashToken(token), auth.userId],
+      [invitationId, auth.workspaceId, normalizedEmail, role, batchId || null, hashToken(token), auth.userId],
     );
     await connection.execute(
       'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
       [randomUUID(), auth.workspaceId, auth.userId, 'invitation.created', JSON.stringify({ email: email.toLowerCase(), role })],
     );
     await connection.commit();
-    res.status(201).json({ success: true, invitePath: `/?invite=${encodeURIComponent(token)}`, expiresInDays: 7 });
+    const invitePath = `/?invite=${encodeURIComponent(token)}`;
+    const delivery = await sendAccountLifecycleEmail(req, { workspaceId: auth.workspaceId, recipientEmail: normalizedEmail, type: 'workspace_invitation', relatedEntityId: invitationId, heading: 'You are invited to TalentEdge', message: `Your college has invited you to join as a ${role.replace('_', ' ')}.`, actionLabel: 'Accept invitation', actionUrl: invitePath, expiry: 'This invitation link expires in 7 days.', rateLimitReserved: true });
+    res.status(201).json({ success: true, invitePath, expiresInDays: 7, delivery });
   } catch (error) {
     await connection.rollback();
     console.error('Invitation creation failed:', error);
@@ -2775,7 +3647,8 @@ app.post('/api/workspace/invitations', requireRole('college_admin'), async (req,
 // Lazy-initialized Gemini AI client
 let geminiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI | null {
-  if (!geminiClient && process.env.GEMINI_API_KEY) {
+  if (process.env.AI_EXTERNAL_PROCESSING_ENABLED !== 'true' || !process.env.GEMINI_API_KEY) return null;
+  if (!geminiClient) {
     geminiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   }
   return geminiClient;
@@ -2901,7 +3774,7 @@ async function reconcileAllCurriculumProgress(workspaceId: string, studentUserId
   return completedDays;
 }
 
-app.get('/api/curriculum/progress', requireRole('student'), async (req, res) => {
+app.get('/api/curriculum/progress', requireWorkspacePermission('curriculum.read_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     res.json(await reconcileAllCurriculumProgress(auth.workspaceId, auth.userId));
@@ -2911,7 +3784,7 @@ app.get('/api/curriculum/progress', requireRole('student'), async (req, res) => 
   }
 });
 
-app.put('/api/curriculum/progress/:dayNumber', requireRole('student'), async (req, res) => {
+app.put('/api/curriculum/progress/:dayNumber', requireWorkspacePermission('curriculum.progress.update_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const dayNumber = Number(req.params.dayNumber);
   const { completed } = req.body || {};
@@ -2921,7 +3794,7 @@ app.put('/api/curriculum/progress/:dayNumber', requireRole('student'), async (re
   return res.status(409).json({ error: `Day ${dayNumber} completion is automatic. Review all required materials and pass its learning check.` });
 });
 
-app.get('/api/curriculum/learning-check', requireRole('student'), async (req, res) => {
+app.get('/api/curriculum/learning-check', requireWorkspacePermission('curriculum.read_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const dayNumber = Number(req.query.dayNumber || 1);
   if (!Number.isInteger(dayNumber) || dayNumber < 1 || dayNumber > 40) return res.status(400).json({ error: 'Choose a curriculum day from 1 to 40.' });
@@ -2956,7 +3829,7 @@ app.get('/api/curriculum/learning-check', requireRole('student'), async (req, re
   }
 });
 
-app.post('/api/curriculum/learning-check/attempts', requireRole('student'), async (req, res) => {
+app.post('/api/curriculum/learning-check/attempts', requireWorkspacePermission('curriculum.progress.update_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { answers, dayNumber = 1 } = req.body || {};
   if (!Number.isInteger(dayNumber) || dayNumber < 1 || dayNumber > 40) return res.status(400).json({ error: 'Choose a curriculum day from 1 to 40.' });
@@ -2999,7 +3872,7 @@ app.post('/api/curriculum/learning-check/attempts', requireRole('student'), asyn
 });
 
 // Curriculum materials are shared per workspace; completion is tracked separately for each student.
-app.get('/api/curriculum/materials', requireRole('college_admin', 'trainer', 'student'), async (req, res) => {
+app.get('/api/curriculum/materials', requireWorkspacePermission('curriculum.read_own', 'curriculum.read_assigned', 'curriculum.manage_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const dayNumber = Number(req.query.dayNumber || 1);
   if (!Number.isInteger(dayNumber) || dayNumber < 1 || dayNumber > 40) return res.status(400).json({ error: 'Choose a curriculum day from 1 to 40.' });
@@ -3022,7 +3895,7 @@ app.get('/api/curriculum/materials', requireRole('college_admin', 'trainer', 'st
   }
 });
 
-app.post('/api/curriculum/materials', requireRole('college_admin', 'trainer'), async (req, res) => {
+app.post('/api/curriculum/materials', requireWorkspacePermission('curriculum.manage_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { dayNumber, title, materialType, contentUrl, contentText, contentFormat = 'markdown', isRequired = true } = req.body || {};
   const curriculumDayNumber = Number(dayNumber);
@@ -3059,7 +3932,7 @@ app.post('/api/curriculum/materials', requireRole('college_admin', 'trainer'), a
   }
 });
 
-app.patch('/api/curriculum/materials/:id', requireRole('college_admin', 'trainer'), async (req, res) => {
+app.patch('/api/curriculum/materials/:id', requireWorkspacePermission('curriculum.manage_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { title, materialType, contentUrl, contentText, contentFormat, isRequired } = req.body || {};
   try {
@@ -3097,7 +3970,7 @@ app.patch('/api/curriculum/materials/:id', requireRole('college_admin', 'trainer
   }
 });
 
-app.delete('/api/curriculum/materials/:id', requireRole('college_admin', 'trainer'), async (req, res) => {
+app.delete('/api/curriculum/materials/:id', requireWorkspacePermission('curriculum.manage_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute('SELECT dayNumber FROM WorkspaceCurriculumMaterials WHERE id = ? AND workspaceId = ? LIMIT 1', [req.params.id, auth.workspaceId]);
@@ -3112,7 +3985,7 @@ app.delete('/api/curriculum/materials/:id', requireRole('college_admin', 'traine
   }
 });
 
-app.put('/api/curriculum/materials/:id/progress', requireRole('student'), async (req, res) => {
+app.put('/api/curriculum/materials/:id/progress', requireWorkspacePermission('curriculum.progress.update_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { status } = req.body || {};
   if (!['in_progress', 'completed'].includes(status)) return res.status(400).json({ error: 'Choose in progress or completed for this material.' });
@@ -3134,7 +4007,7 @@ app.put('/api/curriculum/materials/:id/progress', requireRole('student'), async 
 });
 
 // Fetch all students from MySQL
-app.get('/api/students', async (req, res) => {
+app.get('/api/students', requireWorkspacePermission('students.read_assigned', 'students.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(`
@@ -3158,6 +4031,9 @@ app.get('/api/students', async (req, res) => {
 
     const students = rows.map((student: any) => ({
       ...student,
+      readinessExplanation: explainReadiness({ coding: student.coding, aptitude: student.aptitude,
+        reasoning: student.reasoning, sql: student.sqlScore, csFundamentals: student.csFundamentals,
+        communication: student.communication, techInterview: student.techInterview, hrInterview: student.hrInterview }),
       metrics: {
         coding: student.coding,
         aptitude: student.aptitude,
@@ -3182,7 +4058,7 @@ app.get('/api/students', async (req, res) => {
   }
 });
 
-app.get('/api/reports/activity', requireRole('college_admin'), async (req, res) => {
+app.get('/api/reports/activity', requireWorkspacePermission('report.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const activityType = String(req.query.activityType || 'all');
   const batchId = String(req.query.batchId || '');
@@ -3279,7 +4155,7 @@ app.get('/api/reports/activity', requireRole('college_admin'), async (req, res) 
   }
 });
 
-app.get('/api/reports/interviews', requireRole('college_admin'), async (req, res) => {
+app.get('/api/reports/interviews', requireWorkspacePermission('report.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const batchId = String(req.query.batchId || '').trim();
   const dateFrom = String(req.query.dateFrom || '').trim();
@@ -3373,7 +4249,7 @@ app.get('/api/reports/interviews', requireRole('college_admin'), async (req, res
   }
 });
 
-app.get('/api/reports/placement-outcomes', requireRole('college_admin'), async (req, res) => {
+app.get('/api/reports/placement-outcomes', requireWorkspacePermission('report.read_workspace'), requireWorkspaceFeature('advanced_analytics'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const batchId = String(req.query.batchId || '').trim();
   const outcome = String(req.query.outcome || 'all');
@@ -3419,7 +4295,7 @@ app.get('/api/reports/placement-outcomes', requireRole('college_admin'), async (
 });
 
 // Fetch all batches from MySQL
-app.get('/api/batches', async (req, res) => {
+app.get('/api/batches', requireWorkspacePermission('batches.read_assigned', 'batches.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -3464,7 +4340,7 @@ app.get('/api/batches', async (req, res) => {
   }
 });
 
-app.post('/api/batches', requireRole('college_admin'), async (req, res) => {
+app.post('/api/batches', requireWorkspacePermission('batches.manage'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { name, trainerUserId, startDate, completionDate, currentDay } = req.body || {};
   if (typeof name !== 'string' || name.trim().length < 2 || name.length > 191 || !/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(completionDate)) {
@@ -3517,7 +4393,7 @@ app.post('/api/batches', requireRole('college_admin'), async (req, res) => {
   }
 });
 
-app.patch('/api/batches/:id', requireRole('college_admin'), async (req, res) => {
+app.patch('/api/batches/:id', requireWorkspacePermission('batches.manage'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { id } = req.params;
   const { name, trainerUserId, startDate, completionDate, currentDay, isArchived } = req.body || {};
@@ -3582,7 +4458,7 @@ app.patch('/api/batches/:id', requireRole('college_admin'), async (req, res) => 
   }
 });
 
-app.get('/api/assessments', async (req, res) => {
+app.get('/api/assessments', requireWorkspacePermission('assessment.read_assigned', 'assessment.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     await ensureWorkspaceAssessments(pool, auth.workspaceId);
@@ -3606,8 +4482,15 @@ app.get('/api/assessments', async (req, res) => {
         `SELECT s.assessmentId, COUNT(*) AS attemptCount, MAX(s.submittedAt) AS lastSubmittedAt,
            (SELECT latest.percentage FROM Submissions latest
             WHERE latest.workspaceId = s.workspaceId AND latest.studentId = s.studentId AND latest.assessmentId = s.assessmentId
-            ORDER BY latest.submittedAt DESC, latest.id DESC LIMIT 1) AS latestPercentage
-         FROM Submissions s WHERE s.workspaceId = ? AND s.studentId = ?
+              AND (latest.resultReleased = 1 OR (latest.gradingStatus <> 'pending_review'
+                AND a.resultReleasePolicy = 'after_due' AND a.dueAt IS NOT NULL AND a.dueAt <= UTC_TIMESTAMP()))
+            ORDER BY latest.submittedAt DESC, latest.id DESC LIMIT 1) AS latestPercentage,
+           (SELECT latest.gradingStatus FROM Submissions latest
+            WHERE latest.workspaceId = s.workspaceId AND latest.studentId = s.studentId AND latest.assessmentId = s.assessmentId
+            ORDER BY latest.submittedAt DESC, latest.id DESC LIMIT 1) AS latestGradingStatus
+         FROM Submissions s
+         JOIN Assessments a ON a.workspaceId = s.workspaceId AND a.id = s.assessmentId
+         WHERE s.workspaceId = ? AND s.studentId = ?
          GROUP BY s.workspaceId, s.studentId, s.assessmentId`,
         [auth.workspaceId, auth.userId],
       );
@@ -3620,7 +4503,15 @@ app.get('/api/assessments', async (req, res) => {
         studentStatus: auth.role === 'student' ? (attempt ? 'submitted' : 'not_started') : undefined,
         studentAttemptCount: attempt ? Number(attempt.attemptCount) : 0,
         studentLastSubmittedAt: attempt?.lastSubmittedAt || null,
-        studentLatestPercentage: attempt?.latestPercentage == null ? null : Number(attempt.latestPercentage),
+        studentLatestPercentage: attempt?.latestGradingStatus === 'pending_review' || attempt?.latestPercentage == null
+          ? null : Number(attempt.latestPercentage),
+        studentLatestGradingStatus: attempt?.latestGradingStatus || null,
+        studentLatestResultReleased: attempt?.latestGradingStatus === 'pending_review'
+          ? false : attempt?.latestPercentage != null,
+        studentCanStart: auth.role !== 'student' || (row.status === 'live'
+          && (!(Number(row.maxAttempts) > 0) || Number(attempt?.attemptCount || 0) < Number(row.maxAttempts))
+          && (!row.availableAt || Date.now() >= new Date(row.availableAt).getTime())
+          && (!row.dueAt || Number(row.allowLateSubmission) || Date.now() <= new Date(row.dueAt).getTime())),
       }, auth.role === 'student');
     }));
   } catch (error) {
@@ -3629,11 +4520,24 @@ app.get('/api/assessments', async (req, res) => {
   }
 });
 
-app.post('/api/assessments', requireRole('college_admin', 'trainer'), async (req, res) => {
+app.post('/api/assessments', requireWorkspacePermission('assessment.manage_assigned', 'assessment.manage_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
-  const { sourceAssessmentId, title, status, scheduledDate, batchId, dayNumber, durationMinutes, purpose, sections, coverage, type, targetCompanies } = req.body || {};
+  const { sourceAssessmentId, title, status, scheduledDate, batchId, dayNumber, durationMinutes, purpose, sections, coverage, type, targetCompanies,
+    maxAttempts = 0, passPercent = ASSESSMENT_PASS_PERCENT, availableAt = null, dueAt = null, allowLateSubmission = false, resultReleasePolicy = 'immediate' } = req.body || {};
+  if (auth.role === 'trainer' && (typeof batchId !== 'string' || !batchId)) return res.status(400).json({ error: 'Assign trainer-created assessments to one of your batches.' });
   if (typeof sourceAssessmentId !== 'string' || typeof title !== 'string' || title.trim().length < 3 || title.length > 191 || !['upcoming', 'live', 'completed'].includes(status) || typeof scheduledDate !== 'string' || scheduledDate.length > 191) {
     return res.status(400).json({ error: 'Choose a source assessment and provide a title, status, and scheduled date.' });
+  }
+  const normalizedAvailableAt = normalizeAssessmentDate(availableAt);
+  const normalizedDueAt = normalizeAssessmentDate(dueAt);
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 0 || maxAttempts > 100
+    || !Number.isInteger(passPercent) || passPercent < 0 || passPercent > 100
+    || (availableAt !== null && normalizedAvailableAt === undefined)
+    || (dueAt !== null && normalizedDueAt === undefined)
+    || (normalizedAvailableAt && normalizedDueAt && Date.parse(normalizedDueAt) <= Date.parse(normalizedAvailableAt))
+    || typeof allowLateSubmission !== 'boolean'
+    || !['immediate', 'after_due', 'manual'].includes(resultReleasePolicy)) {
+    return res.status(400).json({ error: 'Set a valid attempt limit, availability window, late policy, and result release rule.' });
   }
   try {
     let source: any = null;
@@ -3650,30 +4554,9 @@ app.post('/api/assessments', requireRole('college_admin', 'trainer'), async (req
     }
     if (!source) return res.status(404).json({ error: 'Source assessment not found in this workspace.' });
     const parsedSections = sections === undefined ? (source ? JSON.parse(source.sectionsJson) : []) : sections;
-    if (!Array.isArray(parsedSections) || parsedSections.length < 1 || parsedSections.length > 20 || parsedSections.some((section: any) => !section || typeof section.name !== 'string' || !Array.isArray(section.questions) || section.questions.length > 100)) {
-      return res.status(400).json({ error: 'Add at least one valid section containing questions.' });
-    }
-    let computedMarks = 0;
-    let questionCount = 0;
-    let codingQuestionCount = 0;
-    for (const section of parsedSections) {
-      if (!section.id || !section.name.trim()) return res.status(400).json({ error: 'Every section needs an id and name.' });
-      for (const question of section.questions) {
-        questionCount += 1;
-        if (questionCount > 100) return res.status(400).json({ error: 'An assignment can contain at most 100 questions.' });
-        const data = question?.data;
-        if (question?.type === 'mcq') {
-          if (!data || typeof data.text !== 'string' || !data.text.trim() || !Array.isArray(data.options) || data.options.length < 2 || data.options.length > 8 || data.options.some((option: any) => typeof option !== 'string') || !Number.isInteger(data.correctIndex) || data.correctIndex < 0 || data.correctIndex >= data.options.length || !Number.isFinite(data.marks) || data.marks < 1 || data.marks > 100) return res.status(400).json({ error: 'Each multiple-choice question needs a prompt, 2–8 options, a correct option, and marks from 1 to 100.' });
-          computedMarks += data.marks;
-        } else if (question?.type === 'coding') {
-          codingQuestionCount += 1;
-          if (codingQuestionCount > 3) return res.status(400).json({ error: 'An assignment can contain at most 3 coding questions.' });
-          if (!data || typeof data.title !== 'string' || !data.title.trim() || typeof data.description !== 'string' || !data.description.trim() || !Array.isArray(data.testCases) || data.testCases.length < 1 || data.testCases.length > 10 || data.testCases.some((testCase: any) => typeof testCase.input !== 'string' || typeof testCase.expected !== 'string') || !Number.isFinite(data.marks ?? 30) || (data.marks ?? 30) < 1 || (data.marks ?? 30) > 100 || !data.templates || typeof data.templates !== 'object' || Object.values(data.templates).every((template: any) => typeof template !== 'string')) return res.status(400).json({ error: 'Each coding question needs instructions, 1–10 input/output test cases, at least one starter template, and valid marks.' });
-          computedMarks += data.marks ?? 30;
-        } else return res.status(400).json({ error: 'Question type must be multiple choice or coding.' });
-      }
-    }
-    if (!computedMarks) return res.status(400).json({ error: 'Add at least one question to the assignment.' });
+    const questionSet = validateAssessmentSections(parsedSections);
+    if (questionSet.error) return res.status(400).json({ error: questionSet.error });
+    const computedMarks = questionSet.totalMarks;
     if (batchId) {
       const [batches]: any = await pool.execute('SELECT id FROM Batches WHERE id = ? AND workspaceId = ? AND isArchived = 0', [batchId, auth.workspaceId]);
       if (!batches.length) return res.status(400).json({ error: 'Choose a batch in this workspace.' });
@@ -3685,38 +4568,65 @@ app.post('/api/assessments', requireRole('college_admin', 'trainer'), async (req
     const assessmentType = type || source?.type || 'technical';
     if (!['diagnostic', 'coding_benchmark', 'aptitude', 'reasoning', 'communication', 'technical', 'sql', 'interview', 'placement_drive', 'final'].includes(assessmentType)) return res.status(400).json({ error: 'Choose a valid assessment type.' });
     const id = randomUUID();
-    await pool.execute(
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.execute(
       `INSERT INTO Assessments
-       (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId, batchId, isCustomized)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-      [id, auth.workspaceId, Number.isInteger(dayNumber) ? Math.max(1, Math.min(40, dayNumber)) : source?.dayNumber || 1, title.trim(), assessmentType, Number.isInteger(durationMinutes) ? Math.max(1, Math.min(600, durationMinutes)) : source?.durationMinutes || 60, computedMarks, JSON.stringify(Array.isArray(coverage) ? coverage.filter((item: any) => typeof item === 'string').slice(0, 50) : source ? JSON.parse(source.coverageJson) : []), typeof purpose === 'string' ? purpose.slice(0, 255) : source?.purpose || '', status, scheduledDate, JSON.stringify(parsedSections), JSON.stringify(Array.isArray(targetCompanies) ? targetCompanies.filter((item: any) => typeof item === 'string').slice(0, 50) : source ? JSON.parse(source.targetCompaniesJson) : []), auth.userId, batchId || null],
-    );
-    await pool.execute(
+       (id, workspaceId, dayNumber, title, type, durationMinutes, totalMarks, passPercent, coverageJson, purpose, status, scheduledDate, sectionsJson, targetCompaniesJson, createdByUserId, batchId, isCustomized, maxAttempts, availableAt, dueAt, allowLateSubmission, resultReleasePolicy)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+      [id, auth.workspaceId, Number.isInteger(dayNumber) ? Math.max(1, Math.min(40, dayNumber)) : source?.dayNumber || 1, title.trim(), assessmentType, Number.isInteger(durationMinutes) ? Math.max(1, Math.min(600, durationMinutes)) : source?.durationMinutes || 60, computedMarks, passPercent, JSON.stringify(Array.isArray(coverage) ? coverage.filter((item: any) => typeof item === 'string').slice(0, 50) : source ? JSON.parse(source.coverageJson) : []), typeof purpose === 'string' ? purpose.slice(0, 255) : source?.purpose || '', status, scheduledDate, JSON.stringify(parsedSections), JSON.stringify(Array.isArray(targetCompanies) ? targetCompanies.filter((item: any) => typeof item === 'string').slice(0, 50) : source ? JSON.parse(source.targetCompaniesJson) : []), auth.userId, batchId || null, maxAttempts, normalizedAvailableAt || null, normalizedDueAt || null, allowLateSubmission ? 1 : 0, resultReleasePolicy],
+      );
+      await connection.execute(
+      `INSERT INTO AssessmentAssignmentRules (assessmentId, workspaceId, batchId, maxAttempts, availableAt, dueAt, allowLateSubmission, resultReleasePolicy, updatedByUserId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, auth.workspaceId, batchId || null, maxAttempts, normalizedAvailableAt || null, normalizedDueAt || null, allowLateSubmission ? 1 : 0, resultReleasePolicy, auth.userId],
+      );
+      await connection.execute(
       'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
       [randomUUID(), auth.workspaceId, auth.userId, 'assessment.created', JSON.stringify({ assessmentId: id, title: title.trim() })],
-    );
-    const [rows]: any = await pool.execute('SELECT * FROM Assessments WHERE id = ?', [id]);
-    res.status(201).json(serializeAssessment(rows[0]));
+      );
+      const [rows]: any = await connection.execute('SELECT * FROM Assessments WHERE id = ? AND workspaceId = ?', [id, auth.workspaceId]);
+      await saveAssessmentVersion(connection, rows[0], auth.userId, 'Assessment created');
+      await connection.commit();
+      res.status(201).json(serializeAssessment(rows[0]));
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   } catch (error) {
     console.error('Assessment creation failed:', error);
     res.status(500).json({ error: 'Could not create the assessment.' });
   }
 });
 
-app.patch('/api/assessments/:id', requireRole('college_admin', 'trainer'), async (req, res) => {
+app.patch('/api/assessments/:id', requireWorkspacePermission('assessment.manage_assigned', 'assessment.manage_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const { id } = req.params;
-  const { title, dayNumber, durationMinutes, purpose, status, scheduledDate, batchId } = req.body || {};
+  const { title, dayNumber, durationMinutes, purpose, status, scheduledDate, batchId, sections, coverage,
+    maxAttempts, passPercent, availableAt, dueAt, allowLateSubmission, resultReleasePolicy } = req.body || {};
   if (title !== undefined && (typeof title !== 'string' || title.trim().length < 3 || title.length > 191)) return res.status(400).json({ error: 'Assessment title must be at least 3 characters.' });
   if (dayNumber !== undefined && (!Number.isInteger(dayNumber) || dayNumber < 1 || dayNumber > 40)) return res.status(400).json({ error: 'Day number must be between 1 and 40.' });
   if (durationMinutes !== undefined && (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 600)) return res.status(400).json({ error: 'Duration must be between 1 and 600 minutes.' });
   if (status !== undefined && !['upcoming', 'live', 'completed'].includes(status)) return res.status(400).json({ error: 'Invalid assessment status.' });
   if (scheduledDate !== undefined && (typeof scheduledDate !== 'string' || scheduledDate.length > 191)) return res.status(400).json({ error: 'Scheduled date is invalid.' });
+  if (maxAttempts !== undefined && (!Number.isInteger(maxAttempts) || maxAttempts < 0 || maxAttempts > 100)) return res.status(400).json({ error: 'Maximum attempts must be from 0 (unlimited) to 100.' });
+  if (passPercent !== undefined && (!Number.isInteger(passPercent) || passPercent < 0 || passPercent > 100)) return res.status(400).json({ error: 'Pass threshold must be from 0 to 100 percent.' });
+  if (allowLateSubmission !== undefined && typeof allowLateSubmission !== 'boolean') return res.status(400).json({ error: 'Late submission setting is invalid.' });
+  if (resultReleasePolicy !== undefined && !['immediate', 'after_due', 'manual'].includes(resultReleasePolicy)) return res.status(400).json({ error: 'Result release rule is invalid.' });
+  const normalizedAvailableAt = normalizeAssessmentDate(availableAt);
+  const normalizedDueAt = normalizeAssessmentDate(dueAt);
+  if ((availableAt !== undefined && normalizedAvailableAt === undefined)
+    || (dueAt !== undefined && normalizedDueAt === undefined)) return res.status(400).json({ error: 'Availability dates are invalid.' });
   try {
-    const [rows]: any = await pool.execute('SELECT batchId FROM Assessments WHERE id = ? AND workspaceId = ? AND isArchived = 0', [id, auth.workspaceId]);
+    const [rows]: any = await pool.execute('SELECT * FROM Assessments WHERE id = ? AND workspaceId = ? AND isArchived = 0', [id, auth.workspaceId]);
     if (!rows.length) return res.status(404).json({ error: 'Assessment not found in this workspace.' });
-    if (auth.role === 'trainer' && rows[0].batchId) {
-      const [assignments]: any = await pool.execute('SELECT 1 FROM WorkspaceBatchAssignments WHERE workspaceId = ? AND batchId = ? AND trainerUserId = ?', [auth.workspaceId, rows[0].batchId, auth.userId]);
+    const existing = rows[0];
+    if (auth.role === 'trainer' && !existing.batchId) return res.status(403).json({ error: 'Trainers can only update assessments assigned to their batches.' });
+    if (auth.role === 'trainer' && existing.batchId) {
+      const [assignments]: any = await pool.execute('SELECT 1 FROM WorkspaceBatchAssignments WHERE workspaceId = ? AND batchId = ? AND trainerUserId = ?', [auth.workspaceId, existing.batchId, auth.userId]);
       if (!assignments.length) return res.status(403).json({ error: 'You are not assigned to this assessment batch.' });
     }
     if (batchId !== undefined && batchId !== null) {
@@ -3727,26 +4637,91 @@ app.patch('/api/assessments/:id', requireRole('college_admin', 'trainer'), async
         if (!assignments.length) return res.status(403).json({ error: 'You are not assigned to that batch.' });
       }
     }
-    await pool.execute(
+    if (auth.role === 'trainer' && batchId === null) return res.status(403).json({ error: 'Trainer-managed assessments must remain assigned to a batch.' });
+    const parsedSections = sections === undefined ? JSON.parse(existing.sectionsJson || '[]') : sections;
+    const questionSet = validateAssessmentSections(parsedSections);
+    if (questionSet.error) return res.status(400).json({ error: questionSet.error });
+    const nextAvailableAt = availableAt === undefined ? existing.availableAt : normalizedAvailableAt;
+    const nextDueAt = dueAt === undefined ? existing.dueAt : normalizedDueAt;
+    if (nextAvailableAt && nextDueAt && new Date(nextDueAt).getTime() <= new Date(nextAvailableAt).getTime()) return res.status(400).json({ error: 'The due date must be later than the available date.' });
+    const nextMaxAttempts = maxAttempts === undefined ? Number(existing.maxAttempts || 0) : maxAttempts;
+    const nextPassPercent = passPercent === undefined ? Number(existing.passPercent ?? ASSESSMENT_PASS_PERCENT) : passPercent;
+    if (nextMaxAttempts > 0) {
+      const [[attemptLimitCheck]]: any = await pool.execute(
+        `SELECT COUNT(*) AS count FROM (SELECT studentId FROM Submissions WHERE workspaceId = ? AND assessmentId = ? GROUP BY studentId HAVING COUNT(*) > ?) over_limit`,
+        [auth.workspaceId, id, nextMaxAttempts],
+      );
+      if (Number(attemptLimitCheck.count) > 0) return res.status(400).json({ error: 'The attempt limit cannot be lower than attempts already submitted.' });
+    }
+    const nextBatchId = batchId === undefined ? existing.batchId : batchId;
+    const nextAllowLate = allowLateSubmission === undefined ? Boolean(existing.allowLateSubmission) : allowLateSubmission;
+    const nextResultPolicy = resultReleasePolicy === undefined ? existing.resultReleasePolicy : resultReleasePolicy;
+    const nextTitle = title === undefined ? existing.title : title.trim();
+    const nextPurpose = purpose === undefined ? existing.purpose : purpose;
+    const nextDayNumber = dayNumber === undefined ? existing.dayNumber : dayNumber;
+    const nextDuration = durationMinutes === undefined ? existing.durationMinutes : durationMinutes;
+    const nextStatus = status === undefined ? existing.status : status;
+    const nextScheduledDate = scheduledDate === undefined ? existing.scheduledDate : scheduledDate;
+    const nextCoverage = coverage === undefined ? JSON.parse(existing.coverageJson || '[]') : coverage;
+    if (!Array.isArray(nextCoverage) || nextCoverage.length > 50 || nextCoverage.some((topic: any) => typeof topic !== 'string')) return res.status(400).json({ error: 'Assessment topics must be a list of up to 50 text values.' });
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [lockedAssessments]: any = await connection.execute(
+        'SELECT currentVersion FROM Assessments WHERE id = ? AND workspaceId = ? AND isArchived = 0 LIMIT 1 FOR UPDATE',
+        [id, auth.workspaceId],
+      );
+      if (!lockedAssessments.length) { await connection.rollback(); return res.status(404).json({ error: 'Assessment not found.' }); }
+      if (Number(lockedAssessments[0].currentVersion || 1) !== Number(existing.currentVersion || 1)) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'Another editor saved a newer assessment version. Reload before saving your changes.' });
+      }
+      if (nextMaxAttempts > 0) {
+        const [[lockedAttemptLimitCheck]]: any = await connection.execute(
+          `SELECT COUNT(*) AS count FROM (SELECT studentId FROM Submissions WHERE workspaceId = ? AND assessmentId = ? GROUP BY studentId HAVING COUNT(*) > ?) over_limit`,
+          [auth.workspaceId, id, nextMaxAttempts],
+        );
+        if (Number(lockedAttemptLimitCheck.count) > 0) {
+          await connection.rollback();
+          return res.status(400).json({ error: 'The attempt limit cannot be lower than attempts already submitted.' });
+        }
+      }
+      await connection.execute(
       `UPDATE Assessments SET title = COALESCE(?, title), dayNumber = COALESCE(?, dayNumber),
-       durationMinutes = COALESCE(?, durationMinutes), purpose = COALESCE(?, purpose),
-       status = COALESCE(?, status), scheduledDate = COALESCE(?, scheduledDate),
-       batchId = ?, isCustomized = 1 WHERE id = ? AND workspaceId = ?`,
-      [title === undefined ? null : title.trim(), dayNumber ?? null, durationMinutes ?? null, purpose ?? null, status ?? null, scheduledDate ?? null, batchId === undefined ? rows[0].batchId : batchId, id, auth.workspaceId],
-    );
-    await pool.execute(
+       durationMinutes = ?, purpose = ?, status = ?, scheduledDate = ?, batchId = ?,
+       sectionsJson = ?, totalMarks = ?, coverageJson = ?, maxAttempts = ?, availableAt = ?, dueAt = ?,
+       passPercent = ?, allowLateSubmission = ?, resultReleasePolicy = ?, currentVersion = currentVersion + 1,
+       isCustomized = 1, updatedAt = CURRENT_TIMESTAMP WHERE id = ? AND workspaceId = ?`,
+      [nextTitle, nextDayNumber, nextDuration, nextPurpose, nextStatus, nextScheduledDate, nextBatchId,
+        JSON.stringify(parsedSections), questionSet.totalMarks, JSON.stringify(nextCoverage), nextMaxAttempts,
+        nextAvailableAt || null, nextDueAt || null, nextPassPercent, nextAllowLate ? 1 : 0, nextResultPolicy, id, auth.workspaceId],
+      );
+      await connection.execute(
+      `UPDATE AssessmentAssignmentRules SET batchId = ?, maxAttempts = ?, availableAt = ?, dueAt = ?,
+       allowLateSubmission = ?, resultReleasePolicy = ?, updatedByUserId = ? WHERE assessmentId = ? AND workspaceId = ?`,
+      [nextBatchId, nextMaxAttempts, nextAvailableAt || null, nextDueAt || null, nextAllowLate ? 1 : 0, nextResultPolicy, auth.userId, id, auth.workspaceId],
+      );
+      await connection.execute(
       'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, detailsJson) VALUES (?, ?, ?, ?, ?)',
       [randomUUID(), auth.workspaceId, auth.userId, 'assessment.updated', JSON.stringify({ assessmentId: id })],
-    );
-    const [updated]: any = await pool.execute('SELECT * FROM Assessments WHERE id = ?', [id]);
-    res.json(serializeAssessment(updated[0]));
+      );
+      const [updated]: any = await connection.execute('SELECT * FROM Assessments WHERE id = ? AND workspaceId = ?', [id, auth.workspaceId]);
+      await saveAssessmentVersion(connection, updated[0], auth.userId, 'Assessment content, schedule, or assignment updated');
+      await connection.commit();
+      res.json(serializeAssessment(updated[0]));
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   } catch (error) {
     console.error('Assessment update failed:', error);
     res.status(500).json({ error: 'Could not update the assessment.' });
   }
 });
 
-app.delete('/api/assessments/:id', requireRole('college_admin'), async (req, res) => {
+app.delete('/api/assessments/:id', requireWorkspacePermission('assessment.manage_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [result]: any = await pool.execute('UPDATE Assessments SET isArchived = 1 WHERE id = ? AND workspaceId = ? AND isArchived = 0', [req.params.id, auth.workspaceId]);
@@ -3762,81 +4737,298 @@ app.delete('/api/assessments/:id', requireRole('college_admin'), async (req, res
   }
 });
 
-app.post('/api/assessments/:id/submissions', requireRole('student'), async (req, res) => {
+app.post('/api/assessments/:id/submissions', requireWorkspacePermission('assessment.submit_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
-  const { answers, codingScores, timeSpentSeconds } = req.body || {};
-  if (!answers || typeof answers !== 'object' || Array.isArray(answers) || !Number.isInteger(timeSpentSeconds) || timeSpentSeconds < 0) {
+  const { answers, codingAnswers = {}, timeSpentSeconds, assessmentVersion, requestId } = req.body || {};
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers) || !codingAnswers
+    || typeof codingAnswers !== 'object' || Array.isArray(codingAnswers)
+    || !Number.isInteger(timeSpentSeconds) || timeSpentSeconds < 0
+    || !Number.isInteger(assessmentVersion) || assessmentVersion < 1
+    || typeof requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(requestId)) {
     return res.status(400).json({ error: 'Assessment answers and elapsed time are required.' });
   }
+  const connection = await pool.getConnection();
+  let transactionStarted = false;
   try {
-    const [rows]: any = await pool.execute(
+    await connection.beginTransaction();
+    transactionStarted = true;
+    const [assessmentLocks]: any = await connection.execute(
+      'SELECT id FROM Assessments WHERE id = ? AND workspaceId = ? LIMIT 1 FOR UPDATE',
+      [req.params.id, auth.workspaceId],
+    );
+    if (!assessmentLocks.length) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(404).json({ error: 'Assessment not found.' });
+    }
+    const [priorAttempts]: any = await connection.execute(
+      `SELECT id, assessmentId, score, totalMarks, percentage, passed, timeSpentSeconds, attemptNumber, gradingStatus, resultReleased
+       FROM Submissions WHERE workspaceId = ? AND studentId = ? AND clientRequestId = ? LIMIT 1 FOR UPDATE`,
+      [auth.workspaceId, auth.userId, requestId],
+    );
+    if (priorAttempts.length) {
+      const prior = priorAttempts[0];
+      await connection.rollback(); transactionStarted = false;
+      if (prior.assessmentId !== req.params.id) return res.status(409).json({ error: 'This submission request was already used.' });
+      return res.status(200).json({ id: prior.id, score: Number(prior.score), totalMarks: Number(prior.totalMarks),
+        percentage: Number(prior.percentage), passed: Boolean(prior.passed), timeSpentSeconds: Number(prior.timeSpentSeconds),
+        attemptNumber: Number(prior.attemptNumber), gradingStatus: prior.gradingStatus, resultReleased: Boolean(prior.resultReleased) });
+    }
+    const [rows]: any = await connection.execute(
       `SELECT a.* FROM Assessments a
        JOIN WorkspaceMemberships wm ON wm.workspaceId = a.workspaceId AND wm.userId = ? AND wm.status = 'active'
        JOIN WorkspaceStudentProfiles sp ON sp.workspaceId = wm.workspaceId AND sp.userId = wm.userId
        WHERE a.id = ? AND a.workspaceId = ? AND a.isArchived = 0 AND a.status = 'live'
-         AND (a.batchId IS NULL OR a.batchId = sp.batchId) LIMIT 1`,
+         AND (a.batchId IS NULL OR a.batchId = sp.batchId) LIMIT 1 FOR UPDATE`,
       [auth.userId, req.params.id, auth.workspaceId],
     );
     const assessment = rows[0];
-    if (!assessment) return res.status(404).json({ error: 'This assessment is not live or assigned to your batch.' });
+    if (!assessment) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(404).json({ error: 'This assessment is not live or assigned to your batch.' });
+    }
+    if (Number(assessment.currentVersion || 1) !== assessmentVersion) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(409).json({ error: 'This assessment was revised while you were taking it. Reload the current version before submitting.' });
+    }
+    const now = Date.now();
+    if (assessment.availableAt && now < new Date(assessment.availableAt).getTime()) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(403).json({ error: 'This assessment is not available yet.' });
+    }
+    if (assessment.dueAt && now > new Date(assessment.dueAt).getTime() && !Number(assessment.allowLateSubmission)) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(403).json({ error: 'The submission deadline has passed.' });
+    }
+    if (timeSpentSeconds > Number(assessment.durationMinutes) * 60 + 120) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(400).json({ error: 'Elapsed time exceeds the assessment duration.' });
+    }
+    const [[attemptSummary]]: any = await connection.execute(
+      'SELECT COUNT(*) AS attemptCount FROM Submissions WHERE workspaceId = ? AND assessmentId = ? AND studentId = ?',
+      [auth.workspaceId, assessment.id, auth.userId],
+    );
+    const attemptNumber = Number(attemptSummary.attemptCount || 0) + 1;
+    const maximumAttempts = Number(assessment.maxAttempts || 0);
+    if (maximumAttempts > 0 && attemptNumber > maximumAttempts) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(403).json({ error: `You have used all ${maximumAttempts} allowed attempts.` });
+    }
     const sections = JSON.parse(assessment.sectionsJson || '[]');
     const questions = sections.flatMap((section: any) => section.questions || []);
     let score = 0;
     let maxMarks = 0;
-    const codingResults: Record<string, number> = {};
+    let hasCodingQuestions = false;
+    const codingResults: Record<string, any> = {};
+    const normalizedAnswers: Record<string, number> = {};
+    const normalizedCodingAnswers: Record<string, { code: string; language: string }> = {};
     for (const [index, question] of questions.entries()) {
       if (question.type === 'mcq') {
         const marks = Number(question.data?.marks || 0);
         maxMarks += marks;
-        if (Number(answers[index]) === Number(question.data?.correctIndex)) score += marks;
+        const submitted = answers[String(index)];
+        if (submitted !== undefined) {
+          if (!Number.isInteger(submitted) || submitted < 0 || submitted >= question.data.options.length) {
+            await connection.rollback(); transactionStarted = false;
+            return res.status(400).json({ error: 'One or more multiple-choice answers are invalid.' });
+          }
+          normalizedAnswers[String(index)] = submitted;
+          if (submitted === Number(question.data?.correctIndex)) score += marks;
+        }
       } else if (question.type === 'coding') {
-        const marks = Number(question.data?.marks || 30);
-        maxMarks += marks;
-        const percent = Number(codingScores?.[index]);
-        const bounded = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
-        codingResults[String(index)] = bounded;
-        score += marks * bounded / 100;
+        maxMarks += Number(question.data?.marks || 30);
+        hasCodingQuestions = true;
+        const submitted = codingAnswers[String(index)];
+        if (submitted !== undefined) {
+          if (!submitted || typeof submitted.code !== 'string' || submitted.code.length > 100000
+            || typeof submitted.language !== 'string' || submitted.language.length > 32) {
+            await connection.rollback(); transactionStarted = false;
+            return res.status(400).json({ error: 'A submitted code answer is invalid or too large.' });
+          }
+          normalizedCodingAnswers[String(index)] = submitted;
+          const judged = await executeOnJudge0(submitted.code, submitted.language, question.data.testCases || [], question.data);
+          const codingScore = Math.round(Number(question.data?.marks || 30) * judged.score / 100);
+          codingResults[String(index)] = { score: codingScore, passedTestCases: judged.passedTestCases,
+            totalTestCases: judged.totalTestCases, executionTimeMs: judged.executionTimeMs,
+            memoryKb: judged.memoryKb, results: judged.results };
+          score += codingScore;
+        } else {
+          codingResults[String(index)] = { score: 0, passedTestCases: 0, totalTestCases: (question.data.testCases || []).length, results: [] };
+        }
       }
+    }
+    const questionKeys = new Set(questions.map((_question: any, index: number) => String(index)));
+    if (Object.keys(answers).some((key) => !questionKeys.has(key))
+      || Object.keys(codingAnswers).some((key) => !questionKeys.has(key) || questions[Number(key)]?.type !== 'coding')) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(400).json({ error: 'Answers include an unknown question.' });
     }
     maxMarks = maxMarks || Number(assessment.totalMarks || 0);
     const percentage = maxMarks ? Math.round(score / maxMarks * 100) : 0;
     const submissionId = randomUUID();
-    await pool.execute(
+    const gradingStatus = 'auto_graded';
+    const resultReleased = assessment.resultReleasePolicy === 'immediate'
+      ? 1
+      : assessment.resultReleasePolicy === 'after_due' && assessment.dueAt
+        && now >= new Date(assessment.dueAt).getTime() ? 1 : 0;
+    await connection.execute(
       `INSERT INTO Submissions
-       (id, workspaceId, assessmentId, studentId, score, totalMarks, percentage, timeSpentSeconds, answersJson, codingResultsJson, passed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [submissionId, auth.workspaceId, assessment.id, auth.userId, score, maxMarks, percentage, timeSpentSeconds, JSON.stringify(answers), JSON.stringify(codingResults), percentage >= 70 ? 1 : 0],
+       (id, workspaceId, assessmentId, studentId, score, totalMarks, percentage, timeSpentSeconds,
+        answersJson, codingResultsJson, codingAnswersJson, passed, assessmentVersion, attemptNumber,
+        gradingStatus, resultReleased, clientRequestId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [submissionId, auth.workspaceId, assessment.id, auth.userId, score, maxMarks, percentage, timeSpentSeconds,
+        JSON.stringify(normalizedAnswers), JSON.stringify(codingResults), JSON.stringify(normalizedCodingAnswers),
+        percentage >= Number(assessment.passPercent ?? ASSESSMENT_PASS_PERCENT) ? 1 : 0,
+        Number(assessment.currentVersion || 1), attemptNumber, gradingStatus, resultReleased, requestId],
     );
-    res.status(201).json({ id: submissionId, score, totalMarks: maxMarks, percentage, passed: percentage >= 70, timeSpentSeconds });
+    await connection.execute(
+      'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, targetUserId, detailsJson) VALUES (?, ?, ?, ?, ?, ?)',
+      [randomUUID(), auth.workspaceId, auth.userId, 'assessment.attempt_submitted', auth.userId,
+        JSON.stringify({ assessmentId: assessment.id, attemptNumber, version: Number(assessment.currentVersion || 1), gradingStatus })],
+    );
+    await connection.commit();
+    transactionStarted = false;
+    res.status(201).json({ id: submissionId, score, totalMarks: maxMarks, percentage,
+      passed: percentage >= Number(assessment.passPercent ?? ASSESSMENT_PASS_PERCENT), timeSpentSeconds,
+      attemptNumber, gradingStatus, resultReleased: Boolean(resultReleased) });
   } catch (error) {
+    if (transactionStarted) await connection.rollback();
     console.error('Assessment submission failed:', error);
-    res.status(500).json({ error: 'Could not save this assessment attempt.' });
+    const judgeFailure = error instanceof Error && /Judge0|code execution|coding judge|Bundled .* cases/i.test(error.message);
+    res.status(judgeFailure ? 503 : 500).json({ error: judgeFailure
+      ? 'The coding judge could not evaluate this attempt. No attempt was saved; retry when the judge is available.'
+      : 'Could not save this assessment attempt.' });
+  } finally {
+    connection.release();
   }
 });
 
-app.get('/api/assessments/submissions/mine', requireRole('student'), async (req, res) => {
+app.get('/api/assessments/submissions/mine', requireWorkspacePermission('assessment.read_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
       `SELECT s.id, s.assessmentId, a.title AS assessmentTitle, s.score, s.totalMarks, s.percentage,
-              s.timeSpentSeconds, s.submittedAt, s.answersJson, s.codingResultsJson, s.passed
+              s.timeSpentSeconds, s.submittedAt, s.answersJson, s.codingResultsJson, s.codingAnswersJson,
+              s.feedbackJson, s.passed, s.attemptNumber, s.assessmentVersion, s.gradingStatus,
+              s.resultReleased, a.resultReleasePolicy, a.dueAt
        FROM Submissions s JOIN Assessments a ON a.id = s.assessmentId AND a.workspaceId = s.workspaceId
        WHERE s.workspaceId = ? AND s.studentId = ? ORDER BY s.submittedAt DESC LIMIT 100`,
       [auth.workspaceId, auth.userId],
     );
-    res.json(rows.map((row: any) => ({ ...row, answers: JSON.parse(row.answersJson || '{}'), codingResults: JSON.parse(row.codingResultsJson || '{}'), passed: Boolean(row.passed) })));
+    res.json(rows.map((row: any) => {
+      const released = Boolean(row.resultReleased)
+        || (row.gradingStatus !== 'pending_review' && row.resultReleasePolicy === 'after_due'
+          && row.dueAt && Date.now() >= new Date(row.dueAt).getTime());
+      const { answersJson, codingResultsJson, codingAnswersJson, feedbackJson, ...safeRow } = row;
+      const rawCodingResults = parseStoredJson<Record<string, any>>(codingResultsJson || '{}', {});
+      const safeCodingResults = released ? Object.fromEntries(Object.entries(rawCodingResults).map(([key, value]) =>
+        [key, typeof value === 'number' ? value : Number(value?.score || 0)])) : null;
+      return { ...safeRow, score: released ? Number(row.score) : null, percentage: released ? Number(row.percentage) : null,
+        answers: released ? JSON.parse(answersJson || '{}') : null,
+        codingResults: safeCodingResults,
+        codingAnswers: released ? JSON.parse(codingAnswersJson || '{}') : null,
+        feedback: released ? JSON.parse(feedbackJson || 'null') : null,
+        passed: released ? Boolean(row.passed) : null, resultReleased: released };
+    }));
   } catch (error) {
     console.error('Assessment history query failed:', error);
     res.status(500).json({ error: 'Could not load your assessment history.' });
   }
 });
 
-app.get('/api/assessments/:id/submissions', requireRole('college_admin', 'trainer'), async (req, res) => {
+app.get('/api/assessments/:id/versions', requireWorkspacePermission('assessment.read_assigned', 'assessment.read_workspace'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [assessmentRows]: any = await pool.execute(
+      `SELECT a.batchId FROM Assessments a WHERE a.workspaceId = ? AND a.id = ? AND a.isArchived = 0
+       AND (? = 'college_admin' OR (? = 'trainer' AND a.batchId IS NOT NULL AND EXISTS (
+         SELECT 1 FROM WorkspaceBatchAssignments ba WHERE ba.workspaceId = a.workspaceId
+           AND ba.batchId = a.batchId AND ba.trainerUserId = ?))) LIMIT 1`,
+      [auth.workspaceId, req.params.id, auth.role, auth.role, auth.userId],
+    );
+    if (!assessmentRows.length) return res.status(404).json({ error: 'Assessment not found in your workspace or assigned scope.' });
+    const [rows]: any = await pool.execute(
+      `SELECT v.versionNumber, v.snapshotJson, v.changeSummary, v.createdAt, u.name AS createdBy
+       FROM AssessmentVersions v LEFT JOIN Users u ON u.id = v.createdByUserId
+       WHERE v.workspaceId = ? AND v.assessmentId = ? ORDER BY v.versionNumber DESC`,
+      [auth.workspaceId, req.params.id],
+    );
+    res.json(rows.map((row: any) => ({ ...row, snapshot: JSON.parse(row.snapshotJson) })));
+  } catch (error) {
+    console.error('Assessment version history query failed:', error);
+    res.status(500).json({ error: 'Could not load assessment version history.' });
+  }
+});
+
+app.patch('/api/assessments/submissions/:submissionId/review', requireWorkspacePermission('assessment.manage_assigned', 'assessment.manage_workspace'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const { score, feedback = '', releaseResults = false } = req.body || {};
+  if (!Number.isFinite(score) || score < 0 || typeof feedback !== 'string' || feedback.length > 5000
+    || typeof releaseResults !== 'boolean') return res.status(400).json({ error: 'Provide a valid final score, feedback, and result release setting.' });
+  try {
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows]: any = await connection.execute(
+        `SELECT s.id, s.studentId, s.assessmentId, s.totalMarks, s.assessmentVersion, s.gradingStatus, s.resultReleased, a.title, a.resultReleasePolicy, a.dueAt, a.batchId, a.passPercent,
+                v.snapshotJson
+         FROM Submissions s JOIN Assessments a ON a.id = s.assessmentId AND a.workspaceId = s.workspaceId
+         LEFT JOIN AssessmentVersions v ON v.workspaceId = s.workspaceId AND v.assessmentId = s.assessmentId AND v.versionNumber = s.assessmentVersion
+         WHERE s.workspaceId = ? AND s.id = ? LIMIT 1 FOR UPDATE`,
+        [auth.workspaceId, req.params.submissionId],
+      );
+      const submission = rows[0];
+      if (!submission) { await connection.rollback(); return res.status(404).json({ error: 'Submission not found.' }); }
+      if (score > Number(submission.totalMarks)) { await connection.rollback(); return res.status(400).json({ error: 'Score cannot exceed the assessment total.' }); }
+      if (auth.role === 'trainer') {
+        const [assigned]: any = await connection.execute(
+          `SELECT 1 FROM WorkspaceStudentProfiles sp JOIN WorkspaceBatchAssignments ba
+             ON ba.workspaceId = sp.workspaceId AND ba.batchId = sp.batchId
+           WHERE sp.workspaceId = ? AND sp.userId = ? AND ba.trainerUserId = ? LIMIT 1`,
+          [auth.workspaceId, submission.studentId, auth.userId],
+        );
+        if (!assigned.length) { await connection.rollback(); return res.status(403).json({ error: 'You are not assigned to this student.' }); }
+      }
+      const percentage = Number(submission.totalMarks) ? Math.round(score / Number(submission.totalMarks) * 100) : 0;
+      const attemptSnapshot = submission.snapshotJson ? JSON.parse(submission.snapshotJson) : {};
+      const passPercent = Number(attemptSnapshot.passPercent ?? submission.passPercent ?? ASSESSMENT_PASS_PERCENT);
+      const release = releaseResults || Boolean(submission.resultReleased) || submission.resultReleasePolicy === 'immediate'
+        || (submission.resultReleasePolicy === 'after_due' && submission.dueAt
+          && Date.now() >= new Date(submission.dueAt).getTime());
+      await connection.execute(
+        `UPDATE Submissions SET score = ?, percentage = ?, passed = ?, gradingStatus = 'reviewed',
+         feedbackJson = ?, gradedByUserId = ?, gradedAt = CURRENT_TIMESTAMP,
+         resultReleased = IF(?, 1, resultReleased) WHERE workspaceId = ? AND id = ?`,
+        [score, percentage, percentage >= passPercent ? 1 : 0,
+          JSON.stringify({ text: feedback.trim() }), auth.userId, release ? 1 : 0, auth.workspaceId, submission.id],
+      );
+      await connection.execute(
+        'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, targetUserId, detailsJson) VALUES (?, ?, ?, ?, ?, ?)',
+        [randomUUID(), auth.workspaceId, auth.userId, 'assessment.submission_reviewed', submission.studentId,
+          JSON.stringify({ assessmentId: submission.assessmentId, submissionId: submission.id, percentage, released: release })],
+      );
+      await connection.commit();
+      res.json({ success: true, score, percentage, passed: percentage >= passPercent, resultReleased: release });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('Assessment review failed:', error);
+    res.status(500).json({ error: 'Could not save this assessment review.' });
+  }
+});
+
+app.get('/api/assessments/:id/submissions', requireWorkspacePermission('assessment.read_assigned', 'assessment.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
       `SELECT s.id, s.assessmentId, a.title AS assessmentTitle, s.studentId, u.name AS studentName,
-              s.score, s.totalMarks, s.percentage, s.timeSpentSeconds, s.submittedAt, s.passed
+              s.score, s.totalMarks, s.percentage, s.timeSpentSeconds, s.submittedAt, s.passed,
+              s.attemptNumber, s.assessmentVersion, s.gradingStatus, s.resultReleased,
+              s.answersJson, s.codingAnswersJson, s.codingResultsJson, s.feedbackJson, s.gradedAt
        FROM Submissions s JOIN Assessments a ON a.id = s.assessmentId AND a.workspaceId = s.workspaceId
        JOIN Users u ON u.id = s.studentId
        WHERE s.workspaceId = ? AND s.assessmentId = ? AND (
@@ -3847,14 +5039,17 @@ app.get('/api/assessments/:id/submissions', requireRole('college_admin', 'traine
        ) ORDER BY s.submittedAt DESC`,
       [auth.workspaceId, req.params.id, auth.role, auth.userId],
     );
-    res.json(rows.map((row: any) => ({ ...row, passed: Boolean(row.passed) })));
+    res.json(rows.map((row: any) => ({ ...row, answers: JSON.parse(row.answersJson || '{}'),
+      codingAnswers: JSON.parse(row.codingAnswersJson || '{}'), codingResults: JSON.parse(row.codingResultsJson || '{}'),
+      feedback: JSON.parse(row.feedbackJson || 'null'),
+      passed: Boolean(row.passed), resultReleased: Boolean(row.resultReleased) })));
   } catch (error) {
     console.error('Assessment submissions query failed:', error);
     res.status(500).json({ error: 'Could not load assessment submissions.' });
   }
 });
 
-app.get('/api/leaderboard', async (req, res) => {
+app.get('/api/leaderboard', requireWorkspacePermission('leaderboard.read_assigned', 'analytics.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [rows]: any = await pool.execute(
@@ -3866,12 +5061,13 @@ app.get('/api/leaderboard', async (req, res) => {
        JOIN Users u ON u.id = sp.userId
        JOIN WorkspaceMemberships wm ON wm.userId = u.id AND wm.workspaceId = sp.workspaceId AND wm.status = 'active' AND wm.role = 'student'
        LEFT JOIN Batches b ON b.id = sp.batchId AND b.workspaceId = wm.workspaceId
-       WHERE (? = 'college_admin')
+       WHERE sp.workspaceId = ? AND ((? = 'college_admin')
           OR (? = 'trainer' AND EXISTS (
             SELECT 1 FROM WorkspaceBatchAssignments ba WHERE ba.workspaceId = wm.workspaceId
               AND ba.batchId = sp.batchId AND ba.trainerUserId = ?
           ))
           OR (? = 'student' AND sp.batchId = (SELECT own.batchId FROM WorkspaceStudentProfiles own WHERE own.workspaceId = wm.workspaceId AND own.userId = ?))
+       )
        ORDER BY sp.placementReadinessScore DESC, u.name ASC`,
       [auth.workspaceId, auth.role, auth.role, auth.userId, auth.role, auth.userId],
     );
@@ -3883,7 +5079,7 @@ app.get('/api/leaderboard', async (req, res) => {
 });
 
 // Fetch all notifications from MySQL
-app.get('/api/notifications', async (req, res) => {
+app.get('/api/notifications', requireWorkspacePermission('notifications.read_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [broadcastRows]: any = await pool.execute(
@@ -3902,7 +5098,7 @@ app.get('/api/notifications', async (req, res) => {
   }
 });
 
-app.patch('/api/notifications/:id/read', async (req, res) => {
+app.patch('/api/notifications/:id/read', requireWorkspacePermission('notifications.update_own'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   try {
     const [result]: any = await pool.execute(
@@ -3922,7 +5118,7 @@ app.patch('/api/notifications/:id/read', async (req, res) => {
 });
 
 // Save remarks and update interview scores
-app.post('/api/students/:id/remarks', requireRole('college_admin', 'trainer'), async (req, res) => {
+app.post('/api/students/:id/remarks', requireWorkspacePermission('interview.evaluate_assigned', 'interview.evaluate_workspace'), async (req, res) => {
   try {
     const auth = (req as AuthenticatedRequest).auth!;
     const { id } = req.params;
@@ -3945,14 +5141,15 @@ app.post('/api/students/:id/remarks', requireRole('college_admin', 'trainer'), a
     }
 
     const student = students[0];
-    if (!['tech', 'hr'].includes(type) || typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100 || !remark || typeof remark !== 'object' || remark.type !== type || typeof remark.comment !== 'string' || remark.comment.length > 5000 || !ratings || typeof ratings !== 'object' || Array.isArray(ratings)) {
+    if (!['tech', 'hr'].includes(type) || typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100 || !remark || typeof remark !== 'object' || remark.type !== type || typeof remark.comment !== 'string' || remark.comment.length > 5000 || !ratings || typeof ratings !== 'object' || Array.isArray(ratings) || Object.keys(ratings).length < 1 || Object.keys(ratings).length > 20) {
       return res.status(400).json({ error: 'A valid interview type, score, and remark are required.' });
     }
     for (const value of Object.values(ratings) as any[]) {
       if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 10) return res.status(400).json({ error: 'Interview rubric scores must be between 0 and 10.' });
     }
+    const computedScore = Math.round(Object.values(ratings as Record<string, number>).reduce((sum, value) => sum + value, 0) / Object.keys(ratings).length * 10);
     const recentRemarks = JSON.parse(student.recentRemarksJson || '[]');
-    recentRemarks.unshift(remark);
+    recentRemarks.unshift({ ...remark, score: computedScore, type });
     const scoreCol = type === 'tech' ? 'techInterview' : 'hrInterview';
     const coding = student.coding;
     const aptitude = student.aptitude;
@@ -3961,25 +5158,17 @@ app.post('/api/students/:id/remarks', requireRole('college_admin', 'trainer'), a
     const csFundamentals = student.csFundamentals;
     const communication = student.communication;
     
-    const techInterview = type === 'tech' ? score : student.techInterview;
-    const hrInterview = type === 'hr' ? score : student.hrInterview;
+    const techInterview = type === 'tech' ? computedScore : student.techInterview;
+    const hrInterview = type === 'hr' ? computedScore : student.hrInterview;
 
-    const overallReadiness = Math.round(
-      (coding * 0.25) + 
-      (aptitude * 0.15) + 
-      (reasoning * 0.1) + 
-      (sqlScore * 0.1) + 
-      (csFundamentals * 0.1) + 
-      (communication * 0.1) + 
-      (techInterview * 0.1) + 
-      (hrInterview * 0.1)
-    );
+    const overallReadiness = explainReadiness({ coding, aptitude, reasoning, sql: sqlScore, csFundamentals,
+      communication, techInterview, hrInterview }).score;
 
     await pool.query(
       `UPDATE WorkspaceStudentProfiles
        SET recentRemarksJson = ?, ${scoreCol} = ?, overallReadiness = ?, placementReadinessScore = ?
        WHERE workspaceId = ? AND userId = ?`,
-      [JSON.stringify(recentRemarks), score, overallReadiness, overallReadiness, auth.workspaceId, id]
+      [JSON.stringify(recentRemarks), computedScore, overallReadiness, overallReadiness, auth.workspaceId, id]
     );
 
     const normalizedRecommendation = recommendation === 'hire'
@@ -3990,21 +5179,21 @@ app.post('/api/students/:id/remarks', requireRole('college_admin', 'trainer'), a
     await pool.execute(
       `INSERT INTO InterviewRecords (id, workspaceId, studentId, type, date, panel, status, ratingsJson, remarks, recommendation, score, createdByUserId)
        VALUES (?, ?, ?, ?, ?, ?, 'Completed', ?, ?, ?, ?, ?)`,
-      [randomUUID(), auth.workspaceId, id, type, String(remark.date || new Date().toISOString().slice(0, 10)), auth.name, JSON.stringify(ratings), remark.comment, normalizedRecommendation, score, auth.userId],
+      [randomUUID(), auth.workspaceId, id, type, String(remark.date || new Date().toISOString().slice(0, 10)), auth.name, JSON.stringify(ratings), remark.comment, normalizedRecommendation, computedScore, auth.userId],
     );
     await pool.execute(
       'INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, targetUserId, detailsJson) VALUES (?, ?, ?, ?, ?, ?)',
-      [randomUUID(), auth.workspaceId, auth.userId, 'interview.evaluation_saved', id, JSON.stringify({ type, score })],
+      [randomUUID(), auth.workspaceId, auth.userId, 'interview.evaluation_saved', id, JSON.stringify({ type, score: computedScore })],
     );
 
-    res.json({ success: true, updatedReadiness: overallReadiness });
+    res.json({ success: true, interviewScore: computedScore, updatedReadiness: overallReadiness });
   } catch (error) {
     console.error('Error updating remarks:', error);
     res.status(500).json({ error: 'Database update failed' });
   }
 });
 
-app.get('/api/students/:id/interviews', async (req, res) => {
+app.get('/api/students/:id/interviews', requireWorkspacePermission('interview.read_own', 'interview.history.read_assigned', 'interview.read_workspace'), async (req, res) => {
   const auth = (req as AuthenticatedRequest).auth!;
   const studentId = req.params.id;
   try {
@@ -4034,23 +5223,157 @@ app.get('/api/students/:id/interviews', async (req, res) => {
   }
 });
 
-// AI: Personalized Recommendations
-app.post('/api/ai/recommendations', async (req, res) => {
+app.get('/api/analytics/dashboard', requireWorkspacePermission('analytics.read_assigned', 'analytics.read_workspace'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const studentId = auth.role === 'student' ? auth.userId : String(req.query.studentId || '');
+  if (!await canAccessStudent(auth, studentId)) return res.status(404).json({ error: 'Student not found in your authorized scope.' });
   try {
-    const { studentName, scores, weakAreas, targetCompanies } = req.body;
+    const [profileRows]: any = await pool.execute(
+      `SELECT sp.* , u.name AS studentName
+       FROM WorkspaceStudentProfiles sp
+       JOIN Users u ON u.id = sp.userId
+       JOIN WorkspaceMemberships wm ON wm.workspaceId = sp.workspaceId AND wm.userId = sp.userId
+       WHERE sp.workspaceId = ? AND sp.userId = ? AND wm.role = 'student' AND wm.status = 'active' LIMIT 1`,
+      [auth.workspaceId, studentId],
+    );
+    if (!profileRows.length) return res.status(404).json({ error: 'Student profile is not available in this workspace.' });
+    const profile = profileRows[0];
+
+    const [attemptRows]: any = await pool.execute(
+      `SELECT s.assessmentId, s.percentage, s.codingResultsJson, s.submittedAt, a.coverageJson
+       FROM Submissions s
+       JOIN Assessments a ON a.id = s.assessmentId AND a.workspaceId = s.workspaceId
+       WHERE s.workspaceId = ? AND s.studentId = ?
+       ORDER BY s.submittedAt DESC, s.id DESC LIMIT 40`,
+      [auth.workspaceId, studentId],
+    );
+    const attempts = attemptRows.reverse();
+    const assessmentIds = [...new Set(attempts.map((row: any) => String(row.assessmentId)))];
+    const benchmarkByAssessment = new Map<string, number>();
+    if (profile.batchId && assessmentIds.length) {
+      const placeholders = assessmentIds.map(() => '?').join(',');
+      const [benchmarkRows]: any = await pool.execute(
+        `SELECT s.assessmentId, AVG(s.percentage) AS averageScore
+         FROM Submissions s
+         JOIN WorkspaceStudentProfiles peer ON peer.workspaceId = s.workspaceId AND peer.userId = s.studentId
+         JOIN WorkspaceMemberships wm ON wm.workspaceId = peer.workspaceId AND wm.userId = peer.userId AND wm.role = 'student' AND wm.status = 'active'
+         WHERE s.workspaceId = ? AND peer.batchId = ? AND s.assessmentId IN (${placeholders})
+         GROUP BY s.assessmentId`,
+        [auth.workspaceId, profile.batchId, ...assessmentIds],
+      );
+      for (const row of benchmarkRows) benchmarkByAssessment.set(String(row.assessmentId), Number(row.averageScore) || 0);
+    }
+    const trend = attempts.map((row: any, index: number) => {
+      const codingValues = Object.values(parseStoredJson<Record<string, any>>(row.codingResultsJson, {}))
+        .map((value: any) => Number(typeof value === 'object' && value !== null ? value.score : value))
+        .filter((value) => Number.isFinite(value));
+      const batchAverage = benchmarkByAssessment.get(String(row.assessmentId));
+      return {
+        day: `Attempt ${index + 1}`,
+        studentScore: Number(row.percentage) || 0,
+        codingScore: codingValues.length ? Math.round(codingValues.reduce((sum, value) => sum + value, 0) / codingValues.length) : null,
+        benchmark: batchAverage === undefined ? Number(row.percentage) || 0 : batchAverage,
+      };
+    });
+
+    const topicScores = new Map<string, number[]>();
+    for (const row of attempts) {
+      const topics = parseStoredJson<unknown[]>(row.coverageJson, []);
+      for (const topic of topics) {
+        if (typeof topic !== 'string' || !topic.trim()) continue;
+        const key = topic.trim();
+        topicScores.set(key, [...(topicScores.get(key) || []), Number(row.percentage) || 0]);
+      }
+    }
+    const topics = [...topicScores.entries()].map(([topic, scores]) => ({
+      topic,
+      score: Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length),
+      target: ASSESSMENT_PASS_PERCENT,
+    })).sort((a, b) => a.topic.localeCompare(b.topic)).slice(0, 12);
+
+    const [settingsRows]: any = await pool.execute('SELECT settingsJson FROM WorkspaceSettings WHERE workspaceId = ? LIMIT 1', [auth.workspaceId]);
+    const settings = settingsRows[0] ? parseStoredJson<any>(settingsRows[0].settingsJson, {}) : {};
+    const atRiskBelow = Number.isInteger(settings.atRiskBelow) ? settings.atRiskBelow : 65;
+    const tierOneAtOrAbove = Number.isInteger(settings.tierOneAtOrAbove) ? settings.tierOneAtOrAbove : 80;
+    const [distributionRows]: any = profile.batchId
+      ? await pool.execute(
+        `SELECT COUNT(*) AS total,
+           SUM(sp.placementReadinessScore >= ?) AS tierOne,
+           SUM(sp.placementReadinessScore >= ? AND sp.placementReadinessScore < ?) AS tierTwo,
+           SUM(sp.placementReadinessScore < ?) AS atRisk
+         FROM WorkspaceStudentProfiles sp
+         JOIN WorkspaceMemberships wm ON wm.workspaceId = sp.workspaceId AND wm.userId = sp.userId AND wm.role = 'student' AND wm.status = 'active'
+         WHERE sp.workspaceId = ? AND sp.batchId = ?`,
+        [tierOneAtOrAbove, atRiskBelow, tierOneAtOrAbove, atRiskBelow, auth.workspaceId, profile.batchId],
+      )
+      : await pool.execute(
+        `SELECT COUNT(*) AS total,
+           SUM(sp.placementReadinessScore >= ?) AS tierOne,
+           SUM(sp.placementReadinessScore >= ? AND sp.placementReadinessScore < ?) AS tierTwo,
+           SUM(sp.placementReadinessScore < ?) AS atRisk
+         FROM WorkspaceStudentProfiles sp
+         JOIN WorkspaceMemberships wm ON wm.workspaceId = sp.workspaceId AND wm.userId = sp.userId AND wm.role = 'student' AND wm.status = 'active'
+         WHERE sp.workspaceId = ? AND sp.userId = ?`,
+        [tierOneAtOrAbove, atRiskBelow, tierOneAtOrAbove, atRiskBelow, auth.workspaceId, studentId],
+      );
+    const distribution = [
+      { name: `Tier 1 Ready (≥${tierOneAtOrAbove}%)`, value: Number(distributionRows[0]?.tierOne) || 0, color: '#10B981' },
+      { name: `Tier 2 Ready (${atRiskBelow}–${tierOneAtOrAbove - 1}%)`, value: Number(distributionRows[0]?.tierTwo) || 0, color: '#3B82F6' },
+      { name: `At Risk (<${atRiskBelow}%)`, value: Number(distributionRows[0]?.atRisk) || 0, color: '#F43F5E' },
+    ];
+    res.json({
+      studentName: profile.studentName,
+      readinessScore: Number(profile.placementReadinessScore) || 0,
+      metrics: {
+        coding: Number(profile.coding) || 0,
+        aptitude: Number(profile.aptitude) || 0,
+        reasoning: Number(profile.reasoning) || 0,
+        sql: Number(profile.sqlScore) || 0,
+        csFundamentals: Number(profile.csFundamentals) || 0,
+        communication: Number(profile.communication) || 0,
+        techInterview: Number(profile.techInterview) || 0,
+        hrInterview: Number(profile.hrInterview) || 0,
+      },
+      trend,
+      topics,
+      distribution,
+      batchStudentCount: Number(distributionRows[0]?.total) || 0,
+    });
+  } catch (error) {
+    console.error('Analytics dashboard query failed:', error);
+    res.status(500).json({ error: 'Could not load workspace analytics.' });
+  }
+});
+
+// AI: Personalized Recommendations
+app.post('/api/ai/recommendations', requireWorkspacePermission('ai.recommendation.own', 'ai.recommendation.assigned', 'ai.recommendation.workspace'), async (req, res) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth!;
+    const { studentId } = req.body || {};
+    if (!await canAccessStudent(auth, studentId)) return res.status(404).json({ error: 'Student not found in your authorized scope.' });
+    const [[profile]]: any = await pool.execute(
+      `SELECT coding, aptitude, reasoning, sqlScore, csFundamentals, communication, techInterview, hrInterview, weakAreasJson
+       FROM WorkspaceStudentProfiles WHERE workspaceId = ? AND userId = ? LIMIT 1`, [auth.workspaceId, studentId],
+    );
+    if (!profile) return res.status(404).json({ error: 'Student profile not found.' });
+    let weakAreas: string[] = [];
+    try { weakAreas = JSON.parse(profile.weakAreasJson || '[]').filter((topic: any) => typeof topic === 'string').slice(0, 8); } catch { weakAreas = []; }
+    const targetCompanies = Array.isArray(req.body?.targetCompanies)
+      ? req.body.targetCompanies.filter((company: any) => typeof company === 'string').slice(0, 6) : [];
+    const scores = { coding: Number(profile.coding), aptitude: Number(profile.aptitude), reasoning: Number(profile.reasoning),
+      sql: Number(profile.sqlScore), csFundamentals: Number(profile.csFundamentals), communication: Number(profile.communication),
+      techInterview: Number(profile.techInterview), hrInterview: Number(profile.hrInterview) };
     const ai = getGeminiClient();
 
     if (ai) {
-      const prompt = `You are a Senior Placement Director at a premier engineering university.
-Analyze the following student profile for their 40-Day Campus Readiness Bootcamp:
-Student: ${studentName || 'Student'}
-Scores: Coding: ${scores?.coding || 70}%, Aptitude: ${scores?.aptitude || 65}%, Reasoning: ${scores?.reasoning || 75}%, SQL: ${scores?.sql || 60}%, Communication: ${scores?.communication || 80}%
-Weak Areas: ${(weakAreas || ['Dynamic Programming', 'Time & Work', 'SQL Window Functions']).join(', ')}
-Target Companies: ${(targetCompanies || ['TCS NQT', 'Infosys', 'Accenture', 'Cognizant', 'Capgemini', 'Wipro']).join(', ')}
+      const prompt = `Create a training recommendation from these competency indicators. Do not infer selection odds or make hiring decisions.
+Scores: Coding: ${scores.coding}%, Aptitude: ${scores.aptitude}%, Reasoning: ${scores.reasoning}%, SQL: ${scores.sql}%, CS fundamentals: ${scores.csFundamentals}%, Communication: ${scores.communication}%, Technical interview: ${scores.techInterview}%, HR interview: ${scores.hrInterview}%
+Weak Areas: ${weakAreas.join(', ') || 'Not recorded'}
+Target Companies: ${targetCompanies.join(', ') || 'Not specified'}
 
-Provide a structured, encouraging, and highly specific 3-step action plan for this student to cross the 85%+ readiness mark. Include exact practice topics, daily time split, and company-specific tips for TCS NQT and Infosys. Keep the response crisp, formatted in bullet points with bold highlights.`;
+Provide a structured, encouraging 3-step practice plan. Do not include names or identify the person. Do not claim that any action guarantees employment. Keep it concise and specific.`;
 
-      const generated = await generateWithWorkspaceAi((req as AuthenticatedRequest).auth!.workspaceId, () => ai.models.generateContent({
+      const generated = await generateWithWorkspaceAi(auth.workspaceId, () => ai.models.generateContent({
         model: 'gemini-3.7-flash',
         contents: prompt,
       }));
@@ -4065,7 +5388,7 @@ Provide a structured, encouraging, and highly specific 3-step action plan for th
 
     // High quality rule-based fallback
     return res.json({
-      recommendation: `### Personalized Placement Strategy for ${studentName || 'Candidate'}
+      recommendation: `### Personalized Placement Strategy
 - **Immediate Coding Remediation (2 hrs/day)**: Focus on ${(weakAreas && weakAreas[0]) || 'Dynamic Programming and Two-Pointer'} problems on LeetCode/HackerRank. Prioritize classic 1D array transformations commonly tested in TCS NQT & Infosys DSE rounds.
 - **Aptitude Precision Drill (1 hr/day)**: Practice 25 timed MCQs daily on ${(weakAreas && weakAreas[1]) || 'Time & Work, Permutations, and Syllogisms'}. Target speed threshold under 75 seconds per question.
 - **Technical & SQL Revision (45 mins/day)**: Review DBMS indexing, GROUP BY with HAVING clauses, and 2nd Normal Form explanations for technical panel interviews.
@@ -4079,84 +5402,171 @@ Provide a structured, encouraging, and highly specific 3-step action plan for th
 });
 
 // AI: Readiness Prediction & Company Match
-app.post('/api/ai/predict-readiness', async (req, res) => {
+app.post('/api/ai/predict-readiness', requireWorkspacePermission('ai.readiness.own', 'ai.readiness.assigned', 'ai.readiness.workspace'), async (req, res) => {
   try {
-    const { student, overallScore } = req.body;
-    const ai = getGeminiClient();
-
-    if (ai) {
-      const prompt = `You are an enterprise talent evaluation engine.
-Evaluate placement eligibility for candidate:
-Name: ${student?.name || 'Student'}
-Overall Score: ${overallScore || 78}%
-Coding: ${student?.scores?.coding || 75}%
-Aptitude: ${student?.scores?.aptitude || 70}%
-Communication: ${student?.scores?.communication || 85}%
-Mock Technical Rating: ${student?.scores?.techInterview || 4.2}/5.0
-Mock HR Rating: ${student?.scores?.hrInterview || 4.5}/5.0
-
-Return a JSON with:
-{
-  "readinessTier": "High" | "Moderate" | "Needs Attention",
-  "probabilityTCSDigital": number (0-100),
-  "probabilityInfosysSE": number (0-100),
-  "probabilityAccentureASE": number (0-100),
-  "topStrengths": string[],
-  "criticalGaps": string[],
-  "summary": string
-}`;
-
-      const generated = await generateWithWorkspaceAi((req as AuthenticatedRequest).auth!.workspaceId, () => ai.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: prompt,
-        config: { responseMimeType: 'application/json' },
-      }));
-      if (!generated.allowed) return res.status(429).json({ code: 'PLAN_LIMIT_REACHED', limitKey: 'ai_credits_per_period', error: generated.message });
-      const response = generated.response;
-
-      try {
-        const parsed = JSON.parse(response.text || '{}');
-        return res.json({ ...parsed, generatedByAI: true });
-      } catch {
-        // fallback to standard response if json parsing fails
-      }
+    const auth = (req as AuthenticatedRequest).auth!;
+    const { studentId, targetCompany } = req.body || {};
+    if (!await canAccessStudent(auth, studentId)) return res.status(404).json({ error: 'Student not found in your authorized scope.' });
+    if (targetCompany !== undefined && (typeof targetCompany !== 'string' || targetCompany.length > 120)) {
+      return res.status(400).json({ error: 'Target company must be a short label.' });
     }
-
-    const score = overallScore || 78;
-    const readinessTier = score >= 80 ? 'High' : score >= 65 ? 'Moderate' : 'Needs Attention';
-    return res.json({
-      readinessTier,
-      probabilityTCSDigital: Math.min(98, Math.max(20, Math.round(score * 1.08))),
-      probabilityInfosysSE: Math.min(99, Math.max(30, Math.round(score * 1.15))),
-      probabilityAccentureASE: Math.min(99, Math.max(40, Math.round(score * 1.2))),
-      topStrengths: ['Data Structures & Logic Flow', 'Verbal Communication', 'Object Oriented Programming'],
-      criticalGaps: ['Complex Graph algorithms', 'Subquery optimizations in SQL'],
-      summary: `Candidate demonstrates solid aptitude and structured problem-solving approach. With focused revision on edge-case testing, they have strong odds of clearing Service IT super-dream and dream selection bands.`,
-      generatedByAI: false,
-    });
+    const [[profile]]: any = await pool.execute(
+      `SELECT coding, aptitude, reasoning, sqlScore, csFundamentals, communication, techInterview, hrInterview
+       FROM WorkspaceStudentProfiles WHERE workspaceId = ? AND userId = ? LIMIT 1`, [auth.workspaceId, studentId],
+    );
+    if (!profile) return res.status(404).json({ error: 'Student profile not found.' });
+    const explanation = explainReadiness({ coding: profile.coding, aptitude: profile.aptitude, reasoning: profile.reasoning,
+      sql: profile.sqlScore, csFundamentals: profile.csFundamentals, communication: profile.communication,
+      techInterview: profile.techInterview, hrInterview: profile.hrInterview });
+    const [[settingsRow]]: any = await pool.execute('SELECT settingsJson FROM WorkspaceSettings WHERE workspaceId = ? LIMIT 1', [auth.workspaceId]);
+    const settings = settingsRow ? parseStoredJson<any>(settingsRow.settingsJson, {}) : {};
+    const atRiskBelow = Number.isInteger(settings.atRiskBelow) ? settings.atRiskBelow : 65;
+    const tierOneAtOrAbove = Number.isInteger(settings.tierOneAtOrAbove) ? settings.tierOneAtOrAbove : 80;
+    const score = explanation.score;
+    const predictedTier = score >= tierOneAtOrAbove ? 'high' : score >= atRiskBelow ? 'moderate' : 'needs_attention';
+    const strengths = explanation.factors.filter((factor) => factor.score !== null && factor.score >= 75).sort((a, b) => b.score! - a.score!).slice(0, 3).map((factor) => factor.label);
+    const gaps = explanation.factors.filter((factor) => factor.score !== null && factor.score < 65).sort((a, b) => a.score! - b.score!).slice(0, 3).map((factor) => factor.label);
+    const id = randomUUID();
+    await pool.execute(
+      `INSERT INTO ReadinessPredictionEvents
+       (id, workspaceId, studentId, modelVersion, readinessScore, predictedTier, predictedReady, targetCompany, evidenceJson)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, auth.workspaceId, studentId, READINESS_MODEL_VERSION, score, predictedTier, score >= tierOneAtOrAbove ? 1 : 0,
+        targetCompany || null, JSON.stringify({ factors: explanation.factors, availableWeight: explanation.availableWeight,
+          atRiskBelow, tierOneAtOrAbove, interpretation: explanation.interpretation })],
+    );
+    res.json({ eventId: id, modelVersion: READINESS_MODEL_VERSION, readinessIndex: score, readinessTier: predictedTier,
+      predictedReady: score >= tierOneAtOrAbove, targetCompany: targetCompany || null, topStrengths: strengths,
+      criticalGaps: gaps, summary: `${explanation.interpretation} ${explanation.missingFactors.length
+        ? `Missing data: ${explanation.missingFactors.join(', ')}.` : `Based on ${explanation.availableWeight}% of weighted indicators.`}`,
+      generatedByAI: false, generatedBy: 'weighted_score' });
   } catch (error) {
     console.error('AI prediction error:', error);
     res.status(500).json({ error: 'Failed to predict readiness' });
   }
 });
 
-// AI: Trainer Intervention Summary
-app.post('/api/ai/trainer-summary', requireRole('college_admin', 'trainer'), async (req, res) => {
+app.patch('/api/ai/predictions/:id/outcome', requireWorkspacePermission('students.update_workspace'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const { outcome } = req.body || {};
+  if (!['placed', 'not_placed'].includes(outcome)) return res.status(400).json({ error: 'Outcome must be placed or not placed.' });
   try {
-    const { batchName, atRiskCount, averageScore, lowScoringTopics } = req.body;
+    const [result]: any = await pool.execute(
+      `UPDATE ReadinessPredictionEvents SET actualOutcome = ?, outcomeRecordedAt = CURRENT_TIMESTAMP, outcomeRecordedBy = ?
+       WHERE id = ? AND workspaceId = ?`, [outcome, auth.userId, req.params.id, auth.workspaceId],
+    );
+    if (!result.affectedRows) return res.status(404).json({ error: 'Prediction event not found.' });
+    await pool.execute(
+      `INSERT INTO WorkspaceAuditEvents (id, workspaceId, actorUserId, action, targetUserId, detailsJson)
+       SELECT ?, workspaceId, ?, 'readiness.prediction_outcome_recorded', studentId, JSON_OBJECT('eventId', id, 'outcome', ?)
+       FROM ReadinessPredictionEvents WHERE id = ? AND workspaceId = ?`,
+      [randomUUID(), auth.userId, outcome, req.params.id, auth.workspaceId],
+    );
+    res.json({ success: true, outcome });
+  } catch (error) {
+    console.error('Readiness outcome update failed:', error);
+    res.status(500).json({ error: 'Could not record the placement outcome.' });
+  }
+});
+
+app.get('/api/ai/predictions/pending', requireWorkspacePermission('students.update_workspace'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [rows]: any = await pool.execute(
+      `SELECT p.id AS eventId, p.studentId, u.name AS studentName, p.readinessScore, p.predictedTier,
+              p.targetCompany, p.modelVersion, p.createdAt
+       FROM ReadinessPredictionEvents p JOIN Users u ON u.id = p.studentId AND u.workspaceId = p.workspaceId
+       WHERE p.workspaceId = ? AND p.actualOutcome IS NULL ORDER BY p.createdAt DESC LIMIT 100`, [auth.workspaceId],
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('Pending readiness outcomes query failed:', error);
+    res.status(500).json({ error: 'Could not load pending placement outcome labels.' });
+  }
+});
+
+app.get('/api/ai/prediction-evaluation', requireWorkspacePermission('report.read_workspace'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  try {
+    const [rows]: any = await pool.execute(
+      `SELECT predictedReady, actualOutcome FROM ReadinessPredictionEvents
+       WHERE workspaceId = ? AND modelVersion = ? AND actualOutcome IS NOT NULL`, [auth.workspaceId, READINESS_MODEL_VERSION],
+    );
+    let truePositive = 0, falsePositive = 0, trueNegative = 0, falseNegative = 0;
+    for (const row of rows) {
+      const predicted = Boolean(row.predictedReady);
+      const placed = row.actualOutcome === 'placed';
+      if (predicted && placed) truePositive += 1;
+      else if (predicted) falsePositive += 1;
+      else if (placed) falseNegative += 1;
+      else trueNegative += 1;
+    }
+    const precision = truePositive + falsePositive ? truePositive / (truePositive + falsePositive) : null;
+    const recall = truePositive + falseNegative ? truePositive / (truePositive + falseNegative) : null;
+    res.json({ modelVersion: READINESS_MODEL_VERSION, labeledExamples: rows.length,
+      thresholdDefinition: 'Predicted ready means readiness score at or above the workspace Tier 1 threshold saved at prediction time.',
+      confusion: { truePositive, falsePositive, trueNegative, falseNegative }, precision, recall,
+      validationStatus: rows.length < 30 ? 'insufficient_data' : 'descriptive_only',
+      note: 'These observed rates are not calibrated probabilities and should not be used for employment decisions.' });
+  } catch (error) {
+    console.error('Readiness prediction evaluation failed:', error);
+    res.status(500).json({ error: 'Could not load readiness evaluation metrics.' });
+  }
+});
+
+// AI: Trainer Intervention Summary
+app.post('/api/ai/trainer-summary', requireWorkspacePermission('ai.trainer_summary', 'ai.trainer_summary.workspace'), async (req, res) => {
+  try {
+    const auth = (req as AuthenticatedRequest).auth!;
+    const { batchId } = req.body || {};
+    if (typeof batchId !== 'string' || !batchId) return res.status(400).json({ error: 'Choose a batch in your authorized scope.' });
+    const [batchRows]: any = await pool.execute(
+      `SELECT 1 FROM Batches b WHERE b.id = ? AND b.workspaceId = ? AND b.isArchived = 0
+       AND (? = 'college_admin' OR EXISTS (
+         SELECT 1 FROM WorkspaceBatchAssignments ba
+         WHERE ba.workspaceId = b.workspaceId AND ba.batchId = b.id AND ba.trainerUserId = ?
+       )) LIMIT 1`,
+      [batchId, auth.workspaceId, auth.role, auth.userId],
+    );
+    if (!batchRows.length) return res.status(404).json({ error: 'Batch not found in your authorized scope.' });
+    const [workspaceSettingRows]: any = await pool.execute('SELECT settingsJson FROM WorkspaceSettings WHERE workspaceId = ? LIMIT 1', [auth.workspaceId]);
+    const workspaceSettings = workspaceSettingRows[0] ? parseStoredJson<any>(workspaceSettingRows[0].settingsJson, {}) : {};
+    const atRiskThreshold = Number.isInteger(workspaceSettings.atRiskBelow) ? workspaceSettings.atRiskBelow : 65;
+    const [[metrics]]: any = await pool.execute(
+      `SELECT COUNT(*) AS studentsCount, AVG(sp.placementReadinessScore) AS averageScore,
+         SUM(sp.placementReadinessScore < ?) AS atRiskCount, AVG(sp.coding) AS coding,
+         AVG(sp.aptitude) AS aptitude, AVG(sp.reasoning) AS reasoning, AVG(sp.sqlScore) AS sqlScore,
+         AVG(sp.csFundamentals) AS csFundamentals, AVG(sp.communication) AS communication
+       FROM WorkspaceStudentProfiles sp JOIN WorkspaceMemberships wm ON wm.workspaceId = sp.workspaceId AND wm.userId = sp.userId
+       WHERE sp.workspaceId = ? AND sp.batchId = ? AND wm.role = 'student' AND wm.status = 'active'`,
+      [atRiskThreshold, auth.workspaceId, batchId],
+    );
+    const topicMetrics = [
+      ['Coding & DSA', metrics.coding], ['Aptitude', metrics.aptitude], ['Reasoning', metrics.reasoning],
+      ['SQL & database', metrics.sqlScore], ['CS fundamentals', metrics.csFundamentals], ['Communication', metrics.communication],
+    ].filter(([, value]) => value !== null && value !== undefined).sort((a: any, b: any) => Number(a[1]) - Number(b[1]));
+    const atRiskCount = Number(metrics.atRiskCount || 0);
+    const averageScore = Math.round(Number(metrics.averageScore) || 0);
+    const lowScoringTopics = topicMetrics.slice(0, 3).map(([topic]) => topic);
+    if (Number(metrics.studentsCount || 0) < 5) {
+      return res.json({
+        summary: 'Use a general 30-minute daily doubt-clearing session and provide the standard practice worksheet set. Aggregate AI suggestions are withheld for groups smaller than five to reduce re-identification risk.',
+        generatedByAI: false,
+      });
+    }
     const ai = getGeminiClient();
 
     if (ai) {
-      const prompt = `You are a Master Placement Trainer and Curriculum Advisor.
-Generate an executive intervention briefing for Batch: ${batchName || 'Batch A - 2026 Ready'}.
+      const prompt = `Create an intervention briefing from these anonymous aggregate training metrics. Do not identify or infer facts about individual students.
 Metrics:
-- Total At-Risk Students: ${atRiskCount || 6}
-- Batch Average Score: ${averageScore || 74.5}%
-- Low Scoring Areas: ${(lowScoringTopics || ['Sliding Window', 'Pipes & Cisterns', 'SQL Subqueries']).join(', ')}
+- Active students: ${Number(metrics.studentsCount || 0)}
+- Students below the readiness threshold: ${atRiskCount}
+- Average readiness: ${averageScore}%
+- Lowest skill indicators: ${lowScoringTopics.join(', ') || 'Not enough scored indicators'}
 
-Provide 3 high-impact intervention strategies for trainers this week, including a 30-minute daily doubt-clearing structure and recommended practice worksheets.`;
+Provide three trainer actions for this week, including a 30-minute daily doubt-clearing structure and worksheet topics. Present the figures as descriptive cohort aggregates, not a causal conclusion.`;
 
-      const generated = await generateWithWorkspaceAi((req as AuthenticatedRequest).auth!.workspaceId, () => ai.models.generateContent({
+      const generated = await generateWithWorkspaceAi(auth.workspaceId, () => ai.models.generateContent({
         model: 'gemini-3.7-flash',
         contents: prompt,
       }));
@@ -4167,10 +5577,10 @@ Provide 3 high-impact intervention strategies for trainers this week, including 
     }
 
     return res.json({
-      summary: `### Trainer Intervention Directive for ${batchName || 'Active Batch'}
-1. **Daily 30-Min Micro-Workshops**: Schedule focused problem-solving walkthroughs on ${(lowScoringTopics || ['Sliding Window and Prefix Sums']).slice(0, 2).join(' & ')} before the morning coding test.
-2. **Peer Pairing for At-Risk Trainees**: Pair the ${atRiskCount || 6} identified at-risk trainees with top-quartile mentors for live code reviews.
-3. **Targeted Drill Re-Tests**: Issue an untimed 10-question drill for students scoring below 60% in Day 7 and Day 14 benchmarks to solidify fundamentals before the Day 26 Full Mock.`,
+      summary: `### Trainer Intervention Directive
+1. **Daily 30-Min Micro-Workshops**: Schedule focused practice on ${lowScoringTopics.slice(0, 2).join(' & ') || 'the lowest-scoring skill areas'}.
+2. **Small-Group Support**: Offer voluntary review groups for the ${atRiskCount} students below the current threshold; avoid treating the score as a placement decision.
+3. **Targeted Practice**: Assign short practice worksheets for the identified low-scoring indicators and review progress next week.`,
       generatedByAI: false,
     });
   } catch (error) {
@@ -4179,15 +5589,57 @@ Provide 3 high-impact intervention strategies for trainers this week, including 
   }
 });
 
-// Code Execution Simulator
-app.post('/api/code/run', (req, res) => {
-  const { code, language, testCases } = req.body;
-  const results = (testCases || []).map((tc: any, index: number) => {
-    const passed = !code.includes('syntax_error_test') && !code.includes('throw');
-    return { testCaseId: index + 1, input: tc.input, expected: tc.expected, actual: passed ? tc.expected : 'Runtime Exception: IndexOutOfBounds', passed, hidden: Boolean(tc.hidden), executionTimeMs: Math.floor(Math.random() * 45) + 12, memoryKb: Math.floor(Math.random() * 2048) + 14200 };
-  });
-  const totalPassed = results.filter((result: any) => result.passed).length;
-  res.json({ success: totalPassed === results.length, score: results.length ? Math.round(totalPassed / results.length * 100) : 0, totalTestCases: results.length, passedTestCases: totalPassed, executionTimeMs: 42, memoryKb: 15420, language: language || 'javascript', stdout: `Program executed in ${language}. Passed ${totalPassed}/${results.length} test cases.`, results });
+// Execute untrusted source only through the separately hosted Judge0 sandbox.
+app.post('/api/code/run', requireWorkspacePermission('code.execute'), async (req, res) => {
+  const auth = (req as AuthenticatedRequest).auth!;
+  const { code, language, assessmentId, questionIndex, problemId, input } = req.body || {};
+  if (typeof code !== 'string' || code.length < 1 || code.length > 100000
+    || typeof language !== 'string' || language.length > 32
+    || (input !== undefined && (typeof input !== 'string' || input.length > 20000))) {
+    return res.status(400).json({ error: 'Provide valid source code, language, and input.' });
+  }
+  try {
+    let question: any;
+    if (typeof assessmentId === 'string' && Number.isInteger(questionIndex)) {
+      const [[assessment]]: any = await pool.execute(
+        `SELECT id, batchId, sectionsJson, status, availableAt, dueAt, allowLateSubmission
+         FROM Assessments WHERE workspaceId = ? AND id = ?`, [auth.workspaceId, assessmentId],
+      );
+      if (!assessment) return res.status(404).json({ error: 'Assessment not found.' });
+      if (auth.role === 'student') {
+        if (assessment.status !== 'live' || (assessment.availableAt && Date.now() < new Date(assessment.availableAt).getTime())
+          || (assessment.dueAt && Date.now() > new Date(assessment.dueAt).getTime() && !Number(assessment.allowLateSubmission))) {
+          return res.status(403).json({ error: 'This assessment is not currently available.' });
+        }
+        const [memberships]: any = await pool.execute(
+          `SELECT 1 FROM Users u LEFT JOIN Batches b ON b.workspaceId = u.workspaceId AND b.id = ?
+           WHERE u.id = ? AND u.workspaceId = ? AND u.role = 'student' AND u.status = 'active'
+             AND ((? IS NULL AND u.batchId IS NOT NULL) OR (? IS NOT NULL AND u.batchId = b.id)) LIMIT 1`,
+          [assessment.batchId, auth.userId, auth.workspaceId, assessment.batchId, assessment.batchId],
+        );
+        if (!memberships.length) return res.status(403).json({ error: 'You are not assigned to this assessment.' });
+      }
+      const questions = JSON.parse(assessment.sectionsJson || '[]').flatMap((section: any) => section.questions || []);
+      question = questions[questionIndex];
+      if (question?.type !== 'coding') return res.status(400).json({ error: 'Selected question is not a coding question.' });
+    } else {
+      question = Object.values(SAMPLE_CODING_PROBLEMS).find((item: any) => item.id === problemId)
+        || (typeof problemId === 'string' ? SAMPLE_CODING_PROBLEMS[problemId] : null);
+      if (!question) return res.status(400).json({ error: 'A valid coding problem is required.' });
+      question = { data: question };
+    }
+    const testCases = input !== undefined
+      ? [{ input, expected: undefined }]
+      : question.data.testCases;
+    if (!Array.isArray(testCases) || !testCases.length) return res.status(400).json({ error: 'This coding question has no test cases configured.' });
+    const safeCases = input !== undefined ? testCases : testCases.filter((testCase: any) => !testCase.hidden);
+    const execution = await executeOnJudge0(code, language, safeCases, question.data);
+    if (input !== undefined && execution.results[0]) execution.results[0].passed = true;
+    return res.json(execution);
+  } catch (error) {
+    console.error('Judge0 execution error:', error);
+    return res.status(503).json({ error: error instanceof Error ? error.message : 'Code execution service is unavailable.' });
+  }
 });
 
 // Start Server and Vite Middleware

@@ -45,19 +45,22 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
   });
 
   const [currentIndex, setCurrentIndex] = useState<number>(0);
+  const [submissionRequestId] = useState(() => crypto.randomUUID());
   const [answers, setAnswers] = useState<Record<number, any>>({});
   const [markedForReview, setMarkedForReview] = useState<Record<number, boolean>>({});
   const [visited, setVisited] = useState<Record<number, boolean>>({ 0: true });
-  const [codingScores, setCodingScores] = useState<Record<number, number>>({});
+  const [codingAnswers, setCodingAnswers] = useState<Record<number, { code: string; language: string }>>({});
   const [isSubmitted, setIsSubmitted] = useState<boolean>(false);
   const [isSavingSubmission, setIsSavingSubmission] = useState(false);
   const [submissionError, setSubmissionError] = useState('');
   const [finalPercent, setFinalPercent] = useState<number | null>(null);
+  const [awaitingReview, setAwaitingReview] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [showSubmitModal, setShowSubmitModal] = useState<boolean>(false);
   const [timeLeftSeconds, setTimeLeftSeconds] = useState<number>(assessment.durationMinutes * 60);
   const [aiPlan, setAiPlan] = useState<string>('');
   const [loadingAi, setLoadingAi] = useState<boolean>(false);
+  const passThreshold = assessment.passPercent ?? 70;
 
   // Timer countdown
   useEffect(() => {
@@ -142,26 +145,31 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
       } else if (item.question.type === 'coding') {
         const codingMarks = Number((item.question.data as CodingProblem & { marks?: number }).marks || 30);
         maxMarks += codingMarks;
-        const codeScorePercent = codingScores[idx] ?? 0;
-        calculatedMarks += (codeScorePercent / 100) * codingMarks;
       }
     });
 
     const calculatedPercent = maxMarks > 0 ? Math.round((calculatedMarks / maxMarks) * 100) : 0;
     const timeSpentSeconds = Math.max(0, assessment.durationMinutes * 60 - timeLeftSeconds);
     try {
-      const savedAttempt = await submitWorkspaceAssessment(assessment.id, { answers, codingScores, timeSpentSeconds });
+      const savedAttempt = await submitWorkspaceAssessment(assessment.id, { requestId: submissionRequestId, assessmentVersion: assessment.currentVersion || 1, answers, codingAnswers, timeSpentSeconds });
       const score = savedAttempt.percentage ?? calculatedPercent;
-      setFinalPercent(score);
+      const needsReview = savedAttempt.gradingStatus === 'pending_review' || !savedAttempt.resultReleased;
+      setAwaitingReview(needsReview);
+      setFinalPercent(needsReview ? null : score);
       setElapsedSeconds(savedAttempt.timeSpentSeconds);
       setIsSubmitted(true);
-      if (score >= 70) {
+      if (!needsReview && savedAttempt.passed) {
         try { confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } }); } catch {}
       }
-      onAssessmentCompleted?.(score);
+      if (!needsReview) onAssessmentCompleted?.(score);
+      if (needsReview) {
+        setAiPlan('Your attempt is saved. A trainer will review the coding responses and release your final score and feedback.');
+        return;
+      }
       setLoadingAi(true);
       try {
         const res = await fetchAiRecommendations({
+          studentId: student.id,
           studentName: student.name,
           scores: { assessmentScore: score, coding: student.metrics.coding, aptitude: student.metrics.aptitude },
           weakAreas: student.weakAreas,
@@ -203,7 +211,7 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
 
           <div>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white">
-              Assessment Completed Successfully!
+              {awaitingReview ? 'Attempt Submitted · Review Pending' : 'Assessment Completed Successfully!'}
             </h1>
             <p className="text-sm text-slate-500 mt-1">{assessment.title}</p>
           </div>
@@ -212,11 +220,11 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-2xl mx-auto pt-4">
             <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900/60">
               <span className="text-xs text-indigo-700 dark:text-indigo-300 font-bold uppercase block">Overall Score</span>
-              <span className="text-2xl font-extrabold text-indigo-900 dark:text-indigo-100">{finalPercent ?? 0}%</span>
+              <span className="text-2xl font-extrabold text-indigo-900 dark:text-indigo-100">{finalPercent == null ? 'Pending' : `${finalPercent}%`}</span>
             </div>
             <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-100 dark:border-emerald-900/60">
               <span className="text-xs text-emerald-700 dark:text-emerald-300 font-bold uppercase block">Accuracy</span>
-              <span className="text-2xl font-extrabold text-emerald-900 dark:text-emerald-100">{finalPercent ?? 0}%</span>
+              <span className="text-2xl font-extrabold text-emerald-900 dark:text-emerald-100">{finalPercent == null ? 'Pending' : `${finalPercent}%`}</span>
             </div>
             <div className="p-4 rounded-2xl bg-blue-50 dark:bg-blue-950/40 border border-blue-100 dark:border-blue-900/60">
               <span className="text-xs text-blue-700 dark:text-blue-300 font-bold uppercase block">Time Taken</span>
@@ -224,7 +232,7 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
             </div>
             <div className="p-4 rounded-2xl bg-purple-50 dark:bg-purple-950/40 border border-purple-100 dark:border-purple-900/60">
               <span className="text-xs text-purple-700 dark:text-purple-300 font-bold uppercase block">Assessment Status</span>
-              <span className="text-2xl font-extrabold text-purple-900 dark:text-purple-100">{(finalPercent ?? 0) >= 70 ? 'Passed' : 'Review'}</span>
+              <span className="text-2xl font-extrabold text-purple-900 dark:text-purple-100">{awaitingReview ? 'Awaiting trainer' : (finalPercent ?? 0) >= passThreshold ? 'Passed' : 'Review'}</span>
             </div>
           </div>
 
@@ -448,10 +456,12 @@ export const AssessmentPlayer: React.FC<AssessmentPlayerProps> = ({
                 <CodeEditor
                   standalone={false}
                   initialProblem={currentCodingData}
-                  onSolve={(score) => {
-                    setCodingScores((prev) => ({
+                  assessmentId={assessment.id}
+                  questionIndex={currentIndex}
+                  onSolve={(_score, code, language) => {
+                    setCodingAnswers((prev) => ({
                       ...prev,
-                      [currentIndex]: score,
+                      [currentIndex]: { code, language },
                     }));
                     setAnswers((prev) => ({
                       ...prev,

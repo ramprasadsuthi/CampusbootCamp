@@ -3,10 +3,11 @@ export interface AiRecommendationResponse {
   generatedByAI: boolean;
 }
 export interface AiPredictionResponse {
-  readinessTier: 'High' | 'Moderate' | 'Needs Attention';
-  probabilityTCSDigital: number;
-  probabilityInfosysSE: number;
-  probabilityAccentureASE: number;
+  eventId: string;
+  modelVersion: string;
+  readinessIndex: number;
+  readinessTier: 'high' | 'moderate' | 'needs_attention';
+  predictedReady: boolean;
   topStrengths: string[];
   criticalGaps: string[];
   summary: string;
@@ -49,6 +50,7 @@ async function throwForAiResponseError(response: Response) {
 }
 
 export async function fetchAiRecommendations(params: {
+  studentId: string;
   studentName: string;
   scores: Record<string, number>;
   weakAreas: string[];
@@ -76,63 +78,52 @@ export async function fetchAiRecommendations(params: {
   }
 }
 
-export async function fetchAiReadinessPrediction(student: any, overallScore: number): Promise<AiPredictionResponse> {
-  try {
-    const res = await fetch('/api/ai/predict-readiness', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ student, overallScore }),
-    });
-    await throwForAiResponseError(res);
-    return await res.json();
-  } catch (err) {
-    if (err instanceof PlanLimitReachedError) throw err;
-    console.warn('Fallback to local readiness prediction:', err);
-    const score = overallScore || 85;
-    return {
-      readinessTier: score >= 80 ? 'High' : score >= 65 ? 'Moderate' : 'Needs Attention',
-      probabilityTCSDigital: Math.min(98, Math.max(30, Math.round(score * 1.05))),
-      probabilityInfosysSE: Math.min(99, Math.max(35, Math.round(score * 1.12))),
-      probabilityAccentureASE: Math.min(99, Math.max(45, Math.round(score * 1.18))),
-      topStrengths: ['Data Structures & Algorithmic Optimization', 'Object-Oriented Programming (OOP)', 'Verbal Articulation'],
-      criticalGaps: ['2D DP State transitions under strict timer', 'SQL Query tuning for large datasets'],
-      summary: `Candidate has consistently performed in the upper quartile across all 40 bootcamp days with strong DSA fluency and confident behavioral communication.`,
-      generatedByAI: false,
-    };
-  }
+export async function fetchAiReadinessPrediction(student: any, _overallScore: number): Promise<AiPredictionResponse> {
+  const res = await fetch('/api/ai/predict-readiness', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId: student?.id }),
+  });
+  await throwForAiResponseError(res);
+  return await res.json();
 }
 
 export async function predictCompanyReadiness(params: {
+  studentId: string;
   studentName: string;
   targetCompany: string;
   scores: Record<string, number>;
-}): Promise<{ probability: number; advice: string }> {
-  try {
-    const res = await fetch('/api/ai/predict-readiness', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    await throwForAiResponseError(res);
-    const data = await res.json();
-    return {
-      probability: data.probabilityTCSDigital || 92,
-      advice: data.summary || `Strong algorithmic foundation fits ${params.targetCompany} criteria. Keep revising Day 31-36 mock questions.`,
-    };
-  } catch (err) {
-    if (err instanceof PlanLimitReachedError) throw err;
-    const avg = Math.round(
-      Object.values(params.scores).reduce((a, b) => a + b, 0) /
-        Object.values(params.scores).length
-    );
-    return {
-      probability: Math.min(98, Math.max(50, Math.round(avg * 1.06))),
-      advice: `Based on your DSA coding score (${params.scores.coding || 90}%) and Aptitude benchmark (${params.scores.aptitude || 85}%), you demonstrate strong problem-solving agility well above the ${params.targetCompany} clearance threshold. Focus on time management in remaining practice rounds.`,
-    };
-  }
+}): Promise<{ eventId: string; modelVersion: string; readinessIndex: number; readinessTier: 'high' | 'moderate' | 'needs_attention'; predictedReady: boolean; advice: string; generatedByAI: false }> {
+  const res = await fetch('/api/ai/predict-readiness', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId: params.studentId, targetCompany: params.targetCompany }),
+  });
+  await throwForAiResponseError(res);
+  const data = await res.json();
+  return { ...data, advice: data.summary };
+}
+
+export async function recordReadinessOutcome(eventId: string, outcome: 'placed' | 'not_placed') {
+  const res = await fetch(`/api/ai/predictions/${encodeURIComponent(eventId)}/outcome`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome }),
+  });
+  await throwForAiResponseError(res);
+  return await res.json();
+}
+
+export async function fetchReadinessPredictionEvaluation() {
+  const res = await fetch('/api/ai/prediction-evaluation');
+  await throwForAiResponseError(res);
+  return await res.json();
+}
+
+export async function fetchPendingReadinessPredictions() {
+  const res = await fetch('/api/ai/predictions/pending');
+  await throwForAiResponseError(res);
+  return await res.json();
 }
 
 export async function fetchAiTrainerSummary(params: {
+  batchId: string;
   batchName: string;
   atRiskCount: number;
   averageScore: number;
@@ -151,7 +142,7 @@ export async function fetchAiTrainerSummary(params: {
     return {
       summary: `### 📋 Executive Intervention Strategy for ${params.batchName}
 1. **Targeted Micro-Workshops**: 30 minutes daily before the coding slot dedicated strictly to **${params.lowScoringTopics.slice(0, 2).join(' & ')}**.
-2. **Peer Mentorship Pairing**: Pair the ${params.atRiskCount} at-risk candidates with top-5 cohort performers for collaborative dry-running of benchmark test problems.
+2. **Peer Mentorship Pairing**: Pair the ${params.atRiskCount} at-risk candidates with top-5 batch performers for collaborative dry-running of benchmark test problems.
 3. **Speed Drill Retests**: Conduct an untimed 10-problem diagnostic for students scoring below 65% in recent coding challenges to solidify foundational confidence.`,
       generatedByAI: false,
     };
@@ -159,12 +150,14 @@ export async function fetchAiTrainerSummary(params: {
 }
 
 export async function generateTrainerSummary(params: {
+  batchId: string;
   batchName: string;
   studentsCount: number;
   averageScore: number;
   weakestTopics: string[];
-}): Promise<{ summary: string }> {
+}): Promise<{ summary: string; generatedByAI: boolean }> {
   return await fetchAiTrainerSummary({
+    batchId: params.batchId,
     batchName: params.batchName,
     atRiskCount: Math.round(params.studentsCount * 0.08),
     averageScore: params.averageScore,
@@ -177,26 +170,42 @@ export async function executeCodeOnServer(params: {
   code: string;
   language: string;
   input?: string;
-  testCases: any[];
+  problemId?: string;
+  assessmentId?: string;
+  questionIndex?: number;
 }): Promise<CodeRunResponse> {
-  try {
-    const res = await fetch('/api/code/run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    const results = params.testCases.map((tc, idx) => ({ testCaseId: idx + 1, input: tc.input, expected: tc.expected, actual: tc.expected, passed: true, hidden: Boolean(tc.hidden), executionTimeMs: Math.floor(Math.random() * 30) + 10, memoryKb: 14850 }));
-    return { success: true, score: 100, totalTestCases: params.testCases.length, passedTestCases: params.testCases.length, executionTimeMs: 42, memoryKb: 14850, language: params.language, stdout: `Execution Succeeded. Passed all ${params.testCases.length}/${params.testCases.length} test cases!`, results };
-  }
+  const res = await fetch('/api/code/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Code execution failed (HTTP ${res.status}).`);
+  return data;
 }
 
 export async function fetchStudents(): Promise<any[]> {
   const res = await fetch('/api/students');
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
+}
+
+export interface AnalyticsDashboardData {
+  studentName: string;
+  readinessScore: number;
+  metrics: Record<string, number>;
+  trend: Array<{ day: string; studentScore: number; codingScore: number | null; benchmark: number }>;
+  topics: Array<{ topic: string; score: number; target: number }>;
+  distribution: Array<{ name: string; value: number; color: string }>;
+  batchStudentCount: number;
+}
+
+export async function fetchAnalyticsDashboard(studentId: string): Promise<AnalyticsDashboardData> {
+  const query = new URLSearchParams({ studentId });
+  const response = await fetch(`/api/analytics/dashboard?${query}`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Could not load analytics (HTTP ${response.status}).`);
+  }
+  return await response.json();
 }
 
 export async function fetchBatches(): Promise<any[]> {
@@ -247,11 +256,11 @@ export function updateCurriculumMaterialProgress(id: string, status: 'in_progres
   return apiRequest<{ materialId: string; status: 'in_progress' | 'completed' }>(`/api/curriculum/materials/${encodeURIComponent(id)}/progress`, { method: 'PUT', body: JSON.stringify({ status }) });
 }
 
-export function createWorkspaceAssessment(params: { sourceAssessmentId: string; title: string; status: Assessment['status']; scheduledDate: string; dayNumber?: number; durationMinutes?: number; purpose?: string; batchId?: string | null }) {
+export function createWorkspaceAssessment(params: { sourceAssessmentId: string; title: string; status: Assessment['status']; scheduledDate: string; dayNumber?: number; durationMinutes?: number; purpose?: string; batchId?: string | null; sections?: Assessment['sections']; maxAttempts?: number; passPercent?: number; availableAt?: string | null; dueAt?: string | null; allowLateSubmission?: boolean; resultReleasePolicy?: 'immediate' | 'after_due' | 'manual' }) {
   return apiRequest<Assessment>('/api/assessments', { method: 'POST', body: JSON.stringify(params) });
 }
 
-export function updateWorkspaceAssessment(id: string, params: Partial<Pick<Assessment, 'title' | 'dayNumber' | 'durationMinutes' | 'purpose' | 'status' | 'scheduledDate'>> & { batchId?: string | null }) {
+export function updateWorkspaceAssessment(id: string, params: Partial<Pick<Assessment, 'title' | 'dayNumber' | 'durationMinutes' | 'purpose' | 'status' | 'scheduledDate' | 'sections' | 'passPercent'>> & { batchId?: string | null; coverage?: string[]; maxAttempts?: number; availableAt?: string | null; dueAt?: string | null; allowLateSubmission?: boolean; resultReleasePolicy?: 'immediate' | 'after_due' | 'manual' }) {
   return apiRequest<Assessment>(`/api/assessments/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(params) });
 }
 
@@ -259,8 +268,17 @@ export function archiveWorkspaceAssessment(id: string) {
   return apiRequest<{ success: boolean }>(`/api/assessments/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-export function submitWorkspaceAssessment(id: string, params: { answers: Record<number, number>; codingScores: Record<number, number>; timeSpentSeconds: number }) {
-  return apiRequest<{ id: string; score: number; totalMarks: number; percentage: number; passed: boolean; timeSpentSeconds: number }>(
+export const fetchAssessmentSubmissions = (id: string) => apiRequest<any[]>(`/api/assessments/${encodeURIComponent(id)}/submissions`);
+export const fetchAssessmentVersions = (id: string) => apiRequest<any[]>(`/api/assessments/${encodeURIComponent(id)}/versions`);
+export function reviewAssessmentSubmission(id: string, params: { score: number; feedback: string; releaseResults: boolean }) {
+  return apiRequest<{ success: boolean; score: number; percentage: number; passed: boolean; resultReleased: boolean }>(
+    `/api/assessments/submissions/${encodeURIComponent(id)}/review`,
+    { method: 'PATCH', body: JSON.stringify(params) },
+  );
+}
+
+export function submitWorkspaceAssessment(id: string, params: { requestId: string; assessmentVersion: number; answers: Record<number, number | string>; codingAnswers: Record<number, { code: string; language: string }>; timeSpentSeconds: number }) {
+  return apiRequest<{ id: string; score: number; totalMarks: number; percentage: number; passed: boolean; timeSpentSeconds: number; attemptNumber: number; gradingStatus: 'auto_graded' | 'pending_review'; resultReleased: boolean }>(
     `/api/assessments/${encodeURIComponent(id)}/submissions`,
     { method: 'POST', body: JSON.stringify(params) },
   );

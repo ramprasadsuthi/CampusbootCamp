@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "tsx server.ts",
     "db:migrate-auth": "esbuild migrate-auth.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/migrate-auth.mjs && node dist/migrate-auth.mjs",
+    "db:migrate-billing": "esbuild migrate-billing.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/migrate-billing.mjs && node dist/migrate-billing.mjs",
+    "db:migrate-email": "esbuild migrate-email.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/migrate-email.mjs && node dist/migrate-email.mjs",
+    "db:backup": "tsx backup-mysql.ts",
     "platform-admin:create": "esbuild create-platform-admin.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/create-platform-admin.mjs && node dist/create-platform-admin.mjs",
     "platform-admin:recover": "esbuild recover-platform-admin.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/recover-platform-admin.mjs && node dist/recover-platform-admin.mjs",
     "db:seed": "tsx seed-mysql.ts",

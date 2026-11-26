@@ -41,7 +41,7 @@ export const LeaderboardView: React.FC = () => {
             <span>Bootcamp Hall of Fame</span>
           </div>
           <h1 className="text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-            Cohort Leaderboard & Top Performers
+            Batch Leaderboard & Top Performers
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
             Real-time rankings based on milestone assessments, coding benchmark submissions, and mock interview performances.
@@ -149,7 +149,7 @@ export const LeaderboardView: React.FC = () => {
       {/* Full Leaderboard Table */}
       <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs">
         <h2 className="text-base font-bold text-slate-900 dark:text-white mb-4">
-          All Cohort Standings
+          All Batch Standings
         </h2>
 
         <div className="overflow-x-auto">

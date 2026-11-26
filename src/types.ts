@@ -130,6 +130,7 @@ export interface Assessment {
   type: 'diagnostic' | 'coding_benchmark' | 'aptitude' | 'reasoning' | 'communication' | 'technical' | 'sql' | 'interview' | 'placement_drive' | 'final';
   durationMinutes: number;
   totalMarks: number;
+  passPercent?: number;
   coverage: string[];
   purpose: string;
   status: 'completed' | 'live' | 'upcoming';
@@ -137,10 +138,19 @@ export interface Assessment {
   sections: AssessmentSection[];
   targetCompanies: string[];
   batchId?: string | null;
+  currentVersion?: number;
+  maxAttempts?: number;
+  availableAt?: string | null;
+  dueAt?: string | null;
+  allowLateSubmission?: boolean;
+  resultReleasePolicy?: 'immediate' | 'after_due' | 'manual';
+  studentCanStart?: boolean;
   studentStatus?: 'not_started' | 'submitted';
   studentAttemptCount?: number;
   studentLastSubmittedAt?: string | null;
   studentLatestPercentage?: number | null;
+  studentLatestGradingStatus?: 'auto_graded' | 'pending_review' | 'reviewed' | null;
+  studentLatestResultReleased?: boolean;
 }
 
 export interface AssessmentSubmission {
@@ -157,6 +167,12 @@ export interface AssessmentSubmission {
   answers: Record<string, any>;
   codingResults?: Record<string, any>;
   passed: boolean;
+  attemptNumber?: number;
+  assessmentVersion?: number;
+  gradingStatus?: 'auto_graded' | 'pending_review' | 'reviewed';
+  resultReleased?: boolean;
+  feedback?: { text: string } | null;
+  codingAnswers?: Record<string, { code: string; language: string }>;
 }
 
 export interface CircularMetrics {
@@ -198,6 +214,7 @@ export interface StudentProfile {
   currentDay: number;
   overallProgressPercent: number;
   placementReadinessScore: number;
+  readinessExplanation?: import('./utils/readinessScore').ReadinessExplanation;
   metrics: CircularMetrics;
   eligibility: CompanyEligibility[];
   weakAreas: string[];

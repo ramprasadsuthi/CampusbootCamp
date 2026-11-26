@@ -340,7 +340,7 @@ export const ASSESSMENTS_CATALOG: Assessment[] = [
     durationMinutes: 180,
     totalMarks: 100,
     coverage: ['Quantitative Aptitude', 'Logical Reasoning', 'Verbal & Communication'],
-    purpose: 'Baseline cohort mapping & skill level segmentation for customized 40-day track allocation.',
+    purpose: 'Baseline batch mapping & skill level segmentation for customized 40-day track allocation.',
     status: 'completed',
     scheduledDate: 'Day 1 of 40',
     targetCompanies: ['TCS NQT', 'Infosys', 'Accenture', 'Cognizant', 'Wipro'],

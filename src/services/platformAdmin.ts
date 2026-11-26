@@ -2,7 +2,7 @@ export interface PlatformWorkspace {
   id: string; name: string; slug: string; lifecycleStatus: 'onboarding' | 'active' | 'suspended' | 'archived';
   statusReason: string; createdAt: string; planId: string; subscriptionStatus: string; activeStudents: number; staffCount: number;
 }
-export interface PlatformPlan { id: 'pilot' | 'campus' | 'campus_plus'; name: string; description: string; limits: Array<{ key: 'active_students' | 'trainer_seats' | 'active_batches' | 'ai_credits_per_period'; value: number | null; unit: 'students' | 'seats' | 'batches' | 'credits' }>; features: string[]; isActive: boolean; updatedAt: string; }
+export interface PlatformPlan { id: 'pilot' | 'campus' | 'campus_plus'; name: string; description: string; monthlyPricePaise: number | null; annualPricePaise: number | null; limits: Array<{ key: 'active_students' | 'trainer_seats' | 'active_batches' | 'ai_credits_per_period'; value: number | null; unit: 'students' | 'seats' | 'batches' | 'credits' }>; features: string[]; isActive: boolean; updatedAt: string; }
 export interface PlatformSubscriptionChange { id: string; workspaceId: string; workspaceName: string; reason: string; changedAt: string; actorName: string; actorEmail: string | null; before: Record<string, unknown>; after: Record<string, unknown>; }
 
 async function platformRequest<T>(url: string, options?: RequestInit): Promise<T> {
@@ -45,7 +45,7 @@ export const inviteWorkspaceAdmin = (id: string, email: string) => platformReque
 export const resendWorkspaceAdminInvitation = (workspaceId: string, invitationId: string, reason: string) => platformRequest<{ invitationId: string; email: string; inviteUrl: string }>(`/api/platform/workspaces/${encodeURIComponent(workspaceId)}/admin-invitations/${encodeURIComponent(invitationId)}/resend`, { method: 'POST', body: JSON.stringify({ reason }) });
 export const revokeWorkspaceAdminInvitation = (workspaceId: string, invitationId: string, reason: string) => platformRequest<{ success: boolean }>(`/api/platform/workspaces/${encodeURIComponent(workspaceId)}/admin-invitations/${encodeURIComponent(invitationId)}/revoke`, { method: 'POST', body: JSON.stringify({ reason }) });
 export const setPlatformWorkspaceStatus = (id: string, status: string, reason: string) => platformRequest<{ success: boolean }>(`/api/platform/workspaces/${encodeURIComponent(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status, reason }) });
-export const createPlatformAdminInvitation = (email: string) => platformRequest<{ inviteUrl: string }>('/api/platform/admin-invitations', { method: 'POST', body: JSON.stringify({ email }) });
+export const createPlatformAdminInvitation = (email: string) => platformRequest<{ inviteUrl: string; delivery?: { status: string } }>('/api/platform/admin-invitations', { method: 'POST', body: JSON.stringify({ email }) });
 export const getPlatformAdmins = () => platformRequest<Array<{ id: string; name: string; email: string; isActive: boolean; lastLoginAt: string | null; createdAt: string }>>('/api/platform/admins');
 export const setPlatformAdminStatus = (id: string, isActive: boolean, reason: string) => platformRequest<{ success: boolean }>(`/api/platform/admins/${encodeURIComponent(id)}/status`, { method: 'PATCH', body: JSON.stringify({ isActive, reason }) });
 export const requestPlatformMfaReset = (id: string, reason: string) => platformRequest<{ email: string; inviteUrl: string }>(`/api/platform/admins/${encodeURIComponent(id)}/mfa-reset`, { method: 'POST', body: JSON.stringify({ reason }) });

@@ -512,7 +512,7 @@ export const DEMO_TECH_INTERVIEWS: TechnicalInterviewRecord[] = [
       communication: 9,
       problemSolving: 10,
     },
-    remarks: 'Top 1% candidate in cohort. Flawless explanation of database indexing, B+ trees, and graph BFS.',
+    remarks: 'Top 1% candidate in batch. Flawless explanation of database indexing, B+ trees, and graph BFS.',
     recommendation: 'Hire',
   },
   {

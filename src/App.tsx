@@ -445,6 +445,7 @@ export default function App() {
             }}
             completedDayNumbers={completedCurriculumDays}
             canTrackProgress={currentRole === 'student'}
+            canManageMaterials={currentRole === 'admin'}
             onProgressRefresh={refreshCurriculumProgress}
             curriculumProgressLoading={curriculumProgressLoading}
             curriculumProgressError={curriculumProgressError}
@@ -645,6 +646,7 @@ export default function App() {
         student={selectedStudent}
         isOpen={showAiModal}
         onClose={() => setShowAiModal(false)}
+        canRecordOutcome={currentRole === 'admin'}
       />
 
       {/* Notification Drawer Modal */}

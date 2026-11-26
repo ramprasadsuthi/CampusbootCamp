@@ -59,7 +59,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           { id: 'eval_tech', label: 'Technical Interview Panel', icon: Code },
           { id: 'eval_hr', label: 'HR Interview Panel', icon: User },
           { id: 'curriculum', label: '40-Day Roadmap', icon: CalendarDays },
-          { id: 'analytics', label: 'Cohort Heatmaps', icon: BarChart3 },
+          { id: 'analytics', label: 'Batch Heatmaps', icon: BarChart3 },
           { id: 'leaderboard', label: 'Batch Leaderboard', icon: Trophy },
         ];
       case 'panelist':

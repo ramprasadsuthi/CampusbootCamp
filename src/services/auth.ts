@@ -69,6 +69,10 @@ export function resetPassword(token: string, newPassword: string) {
   });
 }
 
+export const requestPasswordReset = (email: string) => request<{ success: boolean; message: string }>('/api/auth/request-password-reset', { method: 'POST', body: JSON.stringify({ email }) });
+export interface AccountEmailDelivery { id: string; recipientEmail: string; deliveryType: string; relatedEntityId: string | null; status: 'sent' | 'failed' | 'not_configured' | 'queued'; lastError: string | null; requestedAt: string; sentAt: string | null; }
+export const getWorkspaceEmailDeliveries = () => request<AccountEmailDelivery[]>('/api/workspace/email-deliveries');
+
 export function signOut() {
   return request<{ success: boolean }>('/api/auth/logout', { method: 'POST' });
 }
@@ -78,6 +82,13 @@ export const getWorkspaceTrainers = () => request<Array<{ id: string; name: stri
 export const getWorkspaceAudit = () => request<WorkspaceAuditEvent[]>('/api/workspace/audit');
 export const getWorkspaceSettings = () => request<{ settings: WorkspaceSettings }>('/api/workspace/settings');
 export const getWorkspaceSubscriptionOverview = () => request<WorkspaceSubscriptionOverview>('/api/workspace/subscription');
+export interface BillingPlanOption { id: string; name: string; description: string; monthlyPricePaise: number | null; annualPricePaise: number | null; currency: 'INR'; }
+export interface BillingInvoiceRow { id: string; invoiceNumber: string; planId: string; planName: string; amountPaise: number; currency: string; status: 'paid' | 'failed' | 'pending'; providerPaymentId: string | null; providerInvoiceId: string | null; invoiceUrl: string | null; paymentMethod: string | null; issuedAt: string; periodStart: string | null; periodEnd: string | null; }
+export const getWorkspaceBillingPlans = () => request<BillingPlanOption[]>('/api/workspace/billing/plans');
+export const getWorkspaceBillingInvoices = () => request<BillingInvoiceRow[]>('/api/workspace/billing/invoices');
+export const createWorkspaceBillingCheckout = (planId: string, interval: 'monthly' | 'annual') => request<{ attemptId: string; subscriptionId: string; keyId: string; name: string; description: string; amountPaise: number; currency: 'INR'; planName: string; interval: 'monthly' | 'annual'; effectiveAt: string | null }>('/api/workspace/billing/checkout', { method: 'POST', body: JSON.stringify({ planId, interval }) });
+export const confirmWorkspaceBillingCheckout = (confirmation: { attemptId: string; subscriptionId: string; paymentId: string; signature: string }) => request<{ success: boolean; status: string; message: string }>('/api/workspace/billing/confirm', { method: 'POST', body: JSON.stringify(confirmation) });
+export const cancelWorkspaceSubscription = () => request<{ success: boolean; cancelAtPeriodEnd: boolean }>('/api/workspace/billing/cancel', { method: 'POST' });
 export const saveWorkspaceSettings = (settings: WorkspaceSettings) => request<{ settings: WorkspaceSettings }>('/api/workspace/settings', {
   method: 'PUT',
   body: JSON.stringify(settings),

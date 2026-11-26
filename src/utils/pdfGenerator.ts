@@ -1,8 +1,10 @@
 import jsPDF from 'jspdf';
 import { StudentProfile } from '../types';
 import { WorkspaceActivityRow } from '../types/reports';
+import { explainReadiness } from './readinessScore';
 
 export function generateStudentReportPDF(student: StudentProfile) {
+  const readinessExplanation = student.readinessExplanation || explainReadiness(student.metrics as any);
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',
@@ -25,7 +27,7 @@ export function generateStudentReportPDF(student: StudentProfile) {
 
   doc.setFontSize(10);
   doc.setFont('helvetica', 'normal');
-  doc.text('Talent Edge Placement Accelerator Program | 40-Day Bootcamp Dossier', 14, 24);
+  doc.text('Talent Edge Placement Accelerator Program | 40-Day Bootcamp Guide', 14, 24);
   doc.text(`Generated on: ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`, 14, 30);
 
   // Student Info Card Box
@@ -55,9 +57,11 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8);
-  doc.text('OVERALL READINESS', 151, 54);
+  doc.text('WEIGHTED READINESS', 151, 54);
   doc.setFontSize(18);
   doc.text(`${student.placementReadinessScore}%`, 157, 65);
+  doc.setFontSize(6);
+  doc.text(`Model ${readinessExplanation.modelVersion}`, 151, 70);
 
   // Section 1: Core Performance Breakdown Table
   let yPos = 88;
@@ -67,16 +71,6 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.text('1. Core Competency & Assessment Metrics', 14, yPos);
 
   yPos += 6;
-  const metrics = [
-    { name: 'Coding & Algorithmic Problem Solving', score: `${student.metrics.coding}%`, benchmark: '80%', status: student.metrics.coding >= 80 ? 'Mastered' : 'Competent' },
-    { name: 'Quantitative Aptitude & Arithmetic', score: `${student.metrics.aptitude}%`, benchmark: '75%', status: student.metrics.aptitude >= 75 ? 'Mastered' : 'Competent' },
-    { name: 'Logical & Analytical Reasoning', score: `${student.metrics.reasoning}%`, benchmark: '75%', status: student.metrics.reasoning >= 75 ? 'Mastered' : 'Competent' },
-    { name: 'Relational Database Management (SQL)', score: `${student.metrics.sql}%`, benchmark: '70%', status: student.metrics.sql >= 70 ? 'Mastered' : 'Competent' },
-    { name: 'Computer Science Fundamentals (OS/CN/OOP)', score: `${student.metrics.csFundamentals}%`, benchmark: '75%', status: student.metrics.csFundamentals >= 75 ? 'Mastered' : 'Competent' },
-    { name: 'Verbal & Corporate Communication', score: `${student.metrics.communication}%`, benchmark: '80%', status: student.metrics.communication >= 80 ? 'Mastered' : 'Competent' },
-    { name: 'Mock Technical Interview Evaluation', score: `${student.metrics.techInterview}%`, benchmark: '80%', status: 'Panel Approved' },
-    { name: 'Mock HR & Behavioral Interview (STAR)', score: `${student.metrics.hrInterview}%`, benchmark: '80%', status: 'Cleared' },
-  ];
 
   // Table header
   doc.setFillColor(241, 245, 249);
@@ -84,35 +78,41 @@ export function generateStudentReportPDF(student: StudentProfile) {
   doc.setFontSize(8);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(71, 85, 105);
-  doc.text('EVALUATION DOMAIN', 18, yPos + 5);
-  doc.text('STUDENT SCORE', 110, yPos + 5);
-  doc.text('DRIVE BENCHMARK', 145, yPos + 5);
-  doc.text('VERDICT', 178, yPos + 5);
+  doc.text('SKILL INDICATOR', 18, yPos + 5);
+  doc.text('SCORE', 115, yPos + 5);
+  doc.text('WEIGHT', 145, yPos + 5);
+  doc.text('CONTRIB.', 174, yPos + 5);
 
   yPos += 7;
-  metrics.forEach((m, idx) => {
+  readinessExplanation.factors.forEach((factor, idx) => {
     if (idx % 2 === 1) {
       doc.setFillColor(248, 250, 252);
       doc.rect(14, yPos, 182, 6, 'F');
     }
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(30, 41, 59);
-    doc.text(m.name, 18, yPos + 4.5);
+    doc.text(factor.label, 18, yPos + 4.5);
     doc.setFont('helvetica', 'bold');
-    doc.text(m.score, 115, yPos + 4.5);
+    doc.text(factor.score === null ? 'No data' : `${factor.score}%`, 115, yPos + 4.5);
     doc.setFont('helvetica', 'normal');
-    doc.text(m.benchmark, 150, yPos + 4.5);
+    doc.text(`${factor.weight}%`, 149, yPos + 4.5);
     doc.setTextColor(...accentGreen);
-    doc.text(m.status, 178, yPos + 4.5);
+    doc.text(factor.score === null ? '—' : factor.contribution.toFixed(1), 178, yPos + 4.5);
     yPos += 6;
   });
+
+  yPos += 2;
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(7);
+  doc.setTextColor(100, 116, 139);
+  doc.text('Weighted training indicator; not a hiring decision or placement probability.', 14, yPos);
 
   // Section 2: Company Eligibility Tiering
   yPos += 8;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(12);
   doc.setTextColor(...darkSlate);
-  doc.text('2. Target Company Eligibility & Placement Probability', 14, yPos);
+  doc.text('2. Illustrative Company Fit Indicators (Not Hiring Probabilities)', 14, yPos);
 
   yPos += 6;
   student.eligibility.slice(0, 5).forEach((el) => {
@@ -132,7 +132,7 @@ export function generateStudentReportPDF(student: StudentProfile) {
 
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(16, 185, 129);
-    doc.text(`${el.currentProbability}% Match (${el.status})`, 160, yPos + 6.5);
+    doc.text(`Illustrative: ${el.status}`, 160, yPos + 6.5);
 
     yPos += 12;
   });

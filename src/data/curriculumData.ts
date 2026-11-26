@@ -76,7 +76,7 @@ export const CURRICULUM_40_DAYS: CurriculumDay[] = [
     difficulty: 'Beginner',
     assessmentTitle: 'Day 1: Diagnostic Assessment (3 Hours - Aptitude, Reasoning, Communication)',
     assessmentType: 'Diagnostic',
-    expectedOutcome: 'Baseline cohort mapping & mastery of standard computational complexity analysis',
+    expectedOutcome: 'Baseline batch mapping & mastery of standard computational complexity analysis',
   },
   {
     dayNumber: 2,

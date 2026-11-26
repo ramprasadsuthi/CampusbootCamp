@@ -1,6 +1,7 @@
 /**
- * Product and billing contracts for the college-first subscription model.
- * These types describe Stage 1 scope; they do not enforce access or quotas.
+ * Product, permission, and billing contracts for the college-first subscription model.
+ * Workspace permission grants are enforced by shared middleware in server.ts;
+ * plan types describe entitlements and are enforced by workspace business logic.
  */
 
 export type SubscriptionPlanId = 'pilot' | 'campus' | 'campus_plus';
@@ -34,42 +35,62 @@ export type PlanFeature =
  */
 export type WorkspacePermission =
   | 'profile.read_own' | 'profile.update_own'
-  | 'curriculum.read_assigned' | 'curriculum.progress.update_own'
-  | 'assessment.read_assigned' | 'assessment.submit_own'
+  | 'curriculum.read_own' | 'curriculum.read_assigned' | 'curriculum.progress.update_own'
+  | 'assessment.read_own' | 'assessment.read_assigned' | 'assessment.submit_own'
   | 'interview.read_own' | 'report.read_own' | 'certificate.read_own'
-  | 'batches.read_assigned' | 'students.read_assigned'
+  | 'interview.history.read_assigned' | 'interview.panelist.read_assigned' | 'interview.panelist.evaluate_assigned'
+  | 'batches.read_assigned' | 'students.read_assigned' | 'analytics.read_assigned'
+  | 'leaderboard.read_assigned' | 'notifications.read_own' | 'notifications.update_own'
+  | 'ai.recommendation.own' | 'ai.readiness.own' | 'ai.recommendation.assigned' | 'ai.readiness.assigned' | 'code.execute'
   | 'curriculum.manage_assigned' | 'assessment.manage_assigned'
-  | 'interview.evaluate_assigned' | 'analytics.read_assigned' | 'report.export_assigned'
-  | 'workspace.configure' | 'members.invite' | 'members.change_role' | 'members.change_status'
-  | 'batches.manage' | 'students.enroll' | 'curriculum.manage_workspace'
-  | 'assessment.manage_workspace' | 'interview.schedule_workspace'
-  | 'analytics.read_workspace' | 'report.export_workspace'
+  | 'interview.read_assigned' | 'interview.evaluate_assigned' | 'ai.trainer_summary'
+  | 'report.export_assigned' | 'batches.read_workspace' | 'students.read_workspace'
+  | 'assessment.read_workspace' | 'interview.read_workspace' | 'analytics.read_workspace'
+  | 'report.read_workspace' | 'report.export_workspace' | 'ai.recommendation.workspace' | 'ai.readiness.workspace'
+  | 'workspace.configure' | 'members.read' | 'members.invite' | 'members.change_role' | 'members.change_status' | 'members.password_reset'
+  | 'batches.manage' | 'students.enroll' | 'students.update_workspace' | 'curriculum.manage_workspace'
+  | 'assessment.manage_workspace' | 'interview.evaluate_workspace' | 'interview.schedule_workspace'
+  | 'notifications.publish' | 'ai.trainer_summary.workspace'
   | 'subscription.read' | 'subscription.manage' | 'billing.manage' | 'audit.read'
   | 'platform.workspaces.manage' | 'platform.plans.manage' | 'platform.subscriptions.manage'
   | 'platform.shared_content.manage' | 'platform.settings.manage' | 'platform.operations.read'
   | 'platform.billing.read' | 'platform.support_data.access';
 
-export type WorkspaceRoleId = 'student' | 'trainer' | 'college_admin';
+export type WorkspaceRoleId = 'student' | 'trainer' | 'panelist' | 'college_admin';
 export type PlatformRoleId = 'platform_admin';
 
 /** Explicit permissions for college roles. Platform operations are intentionally separate. */
 export const WORKSPACE_ROLE_PERMISSIONS: Readonly<Record<WorkspaceRoleId, readonly WorkspacePermission[]>> = {
   student: [
-    'profile.read_own', 'profile.update_own', 'curriculum.read_assigned', 'curriculum.progress.update_own',
-    'assessment.read_assigned', 'assessment.submit_own', 'interview.read_own', 'report.read_own', 'certificate.read_own',
+    'profile.read_own', 'profile.update_own', 'curriculum.read_own', 'curriculum.read_assigned', 'curriculum.progress.update_own',
+    'assessment.read_own', 'assessment.read_assigned', 'assessment.submit_own', 'interview.read_own', 'report.read_own', 'certificate.read_own',
+    'batches.read_assigned', 'students.read_assigned', 'analytics.read_assigned', 'leaderboard.read_assigned',
+    'notifications.read_own', 'notifications.update_own', 'ai.recommendation.own', 'ai.readiness.own', 'code.execute',
   ],
   trainer: [
     'batches.read_assigned', 'students.read_assigned', 'curriculum.read_assigned', 'curriculum.manage_assigned',
     'assessment.read_assigned', 'assessment.manage_assigned', 'interview.evaluate_assigned',
-    'analytics.read_assigned', 'report.export_assigned',
+    'interview.read_assigned', 'analytics.read_assigned', 'report.export_assigned', 'leaderboard.read_assigned',
+    'notifications.read_own', 'notifications.update_own', 'ai.trainer_summary', 'ai.recommendation.assigned', 'ai.readiness.assigned', 'interview.history.read_assigned', 'code.execute',
+  ],
+  panelist: [
+    'interview.panelist.read_assigned', 'interview.panelist.evaluate_assigned', 'notifications.read_own', 'notifications.update_own',
   ],
   college_admin: [
-    'profile.read_own', 'profile.update_own', 'workspace.configure', 'members.invite', 'members.change_role', 'members.change_status',
-    'batches.manage', 'students.enroll', 'curriculum.manage_workspace', 'assessment.manage_workspace',
-    'interview.schedule_workspace', 'analytics.read_workspace', 'report.export_workspace',
+    'profile.read_own', 'profile.update_own', 'workspace.configure', 'members.read', 'members.invite', 'members.change_role', 'members.change_status', 'members.password_reset',
+    'batches.read_workspace', 'batches.manage', 'students.read_workspace', 'students.enroll', 'students.update_workspace',
+    'curriculum.read_assigned', 'curriculum.manage_workspace', 'assessment.read_workspace', 'assessment.manage_workspace',
+    'interview.read_workspace', 'interview.evaluate_workspace', 'interview.schedule_workspace', 'analytics.read_workspace',
+    'report.read_workspace', 'report.export_workspace', 'notifications.read_own', 'notifications.update_own',
+    'notifications.publish', 'ai.recommendation.workspace', 'ai.readiness.workspace', 'ai.trainer_summary.workspace',
     'subscription.read', 'subscription.manage', 'billing.manage', 'audit.read',
   ],
 };
+
+/** Returns whether a college role is granted a specific server capability. */
+export function hasWorkspacePermission(role: string, permission: WorkspacePermission): boolean {
+  return (WORKSPACE_ROLE_PERMISSIONS as Readonly<Record<string, readonly WorkspacePermission[]>>)[role]?.includes(permission) ?? false;
+}
 
 /** Platform roles never inherit a college workspace role implicitly. */
 export const PLATFORM_ROLE_PERMISSIONS: Readonly<Record<PlatformRoleId, readonly WorkspacePermission[]>> = {
@@ -79,6 +100,11 @@ export const PLATFORM_ROLE_PERMISSIONS: Readonly<Record<PlatformRoleId, readonly
     'platform.billing.read', 'platform.support_data.access',
   ],
 };
+
+/** Platform authorization is checked against its own session and registry. */
+export function hasPlatformPermission(role: string, permission: WorkspacePermission): boolean {
+  return (PLATFORM_ROLE_PERMISSIONS as Readonly<Record<string, readonly WorkspacePermission[]>>)[role]?.includes(permission) ?? false;
+}
 
 export type PlanLimitKey =
   | 'active_students'
@@ -98,7 +124,7 @@ export interface SubscriptionPlanDefinition {
   name: string;
   description: string;
   currency: 'INR';
-  /** Pricing is deliberately unset until validated with pilot colleges. */
+  /** Prices are stored in minor currency units and remain unset until configured. */
   monthlyPricePaise: number | null;
   annualPricePaise: number | null;
   features: readonly PlanFeature[];
@@ -128,7 +154,7 @@ export const SUBSCRIPTION_PLANS: readonly SubscriptionPlanDefinition[] = [
   {
     id: 'pilot',
     name: 'Pilot',
-    description: 'A bounded evaluation of TalentEdge with a college cohort.',
+    description: 'A bounded evaluation of TalentEdge with a college batch.',
     currency: 'INR',
     monthlyPricePaise: null,
     annualPricePaise: null,
@@ -190,5 +216,22 @@ export interface WorkspaceSubscriptionOverview {
     aiCreditsTracked: boolean;
     aiUsagePeriodStart: string;
   };
+}
+
+export interface WorkspaceBillingInvoice {
+  id: string;
+  invoiceNumber: string;
+  planId: SubscriptionPlanId;
+  planName: string;
+  amountPaise: number;
+  currency: string;
+  status: 'paid' | 'failed' | 'pending';
+  providerPaymentId: string | null;
+  providerInvoiceId: string | null;
+  invoiceUrl: string | null;
+  paymentMethod: string | null;
+  issuedAt: string;
+  periodStart: string | null;
+  periodEnd: string | null;
 }
 

@@ -1,7 +1,7 @@
 import React, { FormEvent, useEffect, useState } from 'react';
 import { Building2, Clipboard, KeyRound, LoaderCircle, MailPlus, Pencil, RefreshCw, Save, ShieldCheck, Users, X } from 'lucide-react';
 import { AuthenticatedSession, WorkspaceAuditEvent, WorkspaceMember } from '../types/auth';
-import { createWorkspacePasswordReset, getWorkspaceAudit, getWorkspaceMembers, inviteWorkspaceMember, setWorkspaceMemberStatus, updateWorkspaceMember } from '../services/auth';
+import { createWorkspacePasswordReset, getWorkspaceAudit, getWorkspaceEmailDeliveries, getWorkspaceMembers, inviteWorkspaceMember, setWorkspaceMemberStatus, updateWorkspaceMember, AccountEmailDelivery } from '../services/auth';
 import { fetchBatches } from '../services/api';
 
 interface WorkspaceMembersProps {
@@ -18,6 +18,7 @@ const roleLabels: Record<WorkspaceMember['role'], string> = {
 export const WorkspaceMembers: React.FC<WorkspaceMembersProps> = ({ session }) => {
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [auditEvents, setAuditEvents] = useState<WorkspaceAuditEvent[]>([]);
+  const [emailDeliveries, setEmailDeliveries] = useState<AccountEmailDelivery[]>([]);
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<WorkspaceMember['role']>('student');
   const [batchId, setBatchId] = useState('');
@@ -37,10 +38,11 @@ export const WorkspaceMembers: React.FC<WorkspaceMembersProps> = ({ session }) =
   const loadMembers = async () => {
     setError('');
     try {
-      const [nextMembers, nextAudit, batchList] = await Promise.all([getWorkspaceMembers(), getWorkspaceAudit(), fetchBatches()]);
+      const [nextMembers, nextAudit, batchList, nextDeliveries] = await Promise.all([getWorkspaceMembers(), getWorkspaceAudit(), fetchBatches(), getWorkspaceEmailDeliveries()]);
       setMembers(nextMembers);
       setAuditEvents(nextAudit);
       setBatches(batchList.filter((batch: any) => !batch.isArchived).map((batch: any) => ({ id: batch.id, name: batch.name })));
+      setEmailDeliveries(nextDeliveries);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load members.');
     } finally {
@@ -89,7 +91,8 @@ export const WorkspaceMembers: React.FC<WorkspaceMembersProps> = ({ session }) =
     try {
       const result = await createWorkspacePasswordReset(member.id);
       setResetUrl(`${window.location.origin}${result.resetPath}`);
-      setNotice(`Password reset link created for ${member.name}. It expires in one hour.`);
+      setNotice(result.delivery?.status === 'sent' ? `Password reset email sent to ${member.email}.` : `Password reset link created for ${member.name}. Delivery status: ${result.delivery?.status || 'not configured'}.`);
+      await loadMembers();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create a reset link.');
     }
@@ -108,7 +111,8 @@ export const WorkspaceMembers: React.FC<WorkspaceMembersProps> = ({ session }) =
       setInviteUrl(url);
       setEmail('');
       setBatchId('');
-      setNotice(`Invitation created. The link expires in ${result.expiresInDays} days.`);
+      setNotice(result.delivery?.status === 'sent' ? `Invitation email sent to ${email}.` : `Invitation created. Delivery status: ${result.delivery?.status || 'not configured'}. The link expires in ${result.expiresInDays} days.`);
+      await loadMembers();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create invitation.');
     } finally {
@@ -143,10 +147,10 @@ export const WorkspaceMembers: React.FC<WorkspaceMembersProps> = ({ session }) =
           <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-60">{busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <MailPlus className="h-4 w-4" />}Create invite</button>
         </form>
         {inviteUrl && <div className="mt-4 flex flex-col gap-2 sm:flex-row"><input readOnly value={inviteUrl} className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300" /><button onClick={copyInvite} className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold dark:border-slate-700"><Clipboard className="h-4 w-4" />Copy link</button></div>}
-        <p className="mt-3 text-[11px] text-slate-400">Email delivery is not configured yet. Copy and send the link through your usual channel.</p>
+        <p className="mt-3 text-[11px] text-slate-400">Invitation delivery is tracked below. If email is not configured, copy the link and share it through your verified channel.</p>
       </section>}
 
-      {resetUrl && <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/60 dark:bg-amber-950/30"><p className="mb-2 text-xs font-bold text-amber-900 dark:text-amber-200">One-time password reset link</p><div className="flex flex-col gap-2 sm:flex-row"><input readOnly value={resetUrl} className="min-w-0 flex-1 rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-slate-600 dark:border-amber-900 dark:bg-slate-950 dark:text-slate-300" /><button onClick={async () => { await navigator.clipboard.writeText(resetUrl).catch(() => undefined); setNotice('Password reset link copied.'); }} className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300 px-4 py-2 text-xs font-bold text-amber-900 dark:border-amber-800 dark:text-amber-200"><Clipboard className="h-4 w-4" />Copy link</button></div><p className="mt-2 text-[11px] text-amber-800 dark:text-amber-300">Send this link to the account owner through a verified channel. Email delivery is not configured.</p></section>}
+        {resetUrl && <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/60 dark:bg-amber-950/30"><p className="mb-2 text-xs font-bold text-amber-900 dark:text-amber-200">One-time password reset link</p><div className="flex flex-col gap-2 sm:flex-row"><input readOnly value={resetUrl} className="min-w-0 flex-1 rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-slate-600 dark:border-amber-900 dark:bg-slate-950 dark:text-slate-300" /><button onClick={async () => { await navigator.clipboard.writeText(resetUrl).catch(() => undefined); setNotice('Password reset link copied.'); }} className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300 px-4 py-2 text-xs font-bold text-amber-900 dark:border-amber-800 dark:text-amber-200"><Clipboard className="h-4 w-4" />Copy link</button></div><p className="mt-2 text-[11px] text-amber-800 dark:text-amber-300">Use the email delivery status below. If it was not sent, copy this link and deliver it through a verified channel. It expires in one hour.</p></section>}
 
       {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200">{notice}</p>}
       {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200">{error}</p>}
@@ -163,6 +167,10 @@ export const WorkspaceMembers: React.FC<WorkspaceMembersProps> = ({ session }) =
       <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
         <div className="border-b border-slate-100 p-5 dark:border-slate-800"><h2 className="font-bold text-slate-900 dark:text-white">Recent access activity</h2><p className="mt-1 text-xs text-slate-500">Invitation and membership changes for this workspace.</p></div>
         {auditEvents.length === 0 ? <p className="p-5 text-sm text-slate-500">No workspace activity recorded yet.</p> : <div className="divide-y divide-slate-100 dark:divide-slate-800">{auditEvents.map((event) => <div key={event.id} className="flex flex-wrap items-center justify-between gap-2 px-5 py-3"><div><p className="text-xs font-semibold text-slate-800 dark:text-slate-200">{event.action.replaceAll('.', ' ')}</p><p className="text-[11px] text-slate-500">{event.actorName || 'Workspace member'}{event.details.email ? ` • ${String(event.details.email)}` : ''}{event.details.previousRole ? ` • ${String(event.details.previousRole)} → ${String(event.details.role)}` : ''}{event.details.batchId ? ` • Batch ${String(event.details.batchId)}` : ''}</p></div><time className="text-[10px] text-slate-400">{new Date(event.createdAt).toLocaleString()}</time></div>)}</div>}
+      </section>
+      <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900">
+        <div className="border-b border-slate-100 p-5 dark:border-slate-800"><h2 className="font-bold text-slate-900 dark:text-white">Recent account emails</h2><p className="mt-1 text-xs text-slate-500">Provider acceptance status for invitations, password resets, and account notices.</p></div>
+        {emailDeliveries.length === 0 ? <p className="p-5 text-sm text-slate-500">No account emails recorded yet.</p> : <div className="divide-y divide-slate-100 dark:divide-slate-800">{emailDeliveries.map((delivery) => <div key={delivery.id} className="flex flex-wrap items-center justify-between gap-2 px-5 py-3"><div><p className="text-xs font-semibold text-slate-800 dark:text-slate-200">{delivery.recipientEmail}<span className="ml-2 font-normal capitalize text-slate-500">{delivery.deliveryType.replaceAll('_', ' ')}</span></p><p className="mt-1 text-[10px] text-slate-400">{new Date(delivery.requestedAt).toLocaleString()}{delivery.lastError ? ` · ${delivery.lastError}` : ''}</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${delivery.status === 'sent' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300' : delivery.status === 'failed' ? 'bg-rose-50 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300'}`}>{delivery.status.replaceAll('_', ' ')}</span></div>)}</div>}
       </section>
       <p className="flex items-center gap-2 text-xs text-slate-400"><ShieldCheck className="h-4 w-4" />Roles and access are applied by the server for this college workspace.</p>
     </div>

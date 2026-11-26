@@ -20,17 +20,17 @@ TalentEdge is a full-stack web portal for a 40-day campus placement-readiness bo
 3. **40-day curriculum:** `src/data/curriculumData.ts` defines five phases: technical training (days 1–18), aptitude and reasoning (19–26), HR and communication (27–30), technical revision and core CS (31–36), and placement simulation (37–40). The timeline links curriculum days to assessments.
 4. **Assessments and coding practice:** Assessment content lives in `src/data/assessmentData.ts`. The assessment player supports MCQ and coding question types, while `CodeEditor.tsx` provides a practice-editor interface.
 5. **Interview evaluation:** Technical and HR interview panels capture ratings and remarks. The remarks API updates a student's interview score and recalculates overall readiness.
-6. **Trainer and cohort tools:** Batch/student management, analytics, at-risk views, leaderboard, and AI-generated trainer intervention summaries support cohort oversight.
+6. **Trainer and batch tools:** Batch/student management, analytics, at-risk views, leaderboard, and AI-generated trainer intervention summaries support batch oversight.
 7. **AI insights:** The app requests personalized study recommendations, readiness predictions, and trainer summaries. AI calls are optional and have canned fallback behavior.
 8. **Reporting and completion:** Student dossier PDFs, batch CSV exports, and a certificate view are provided.
 
 ## Data and backend flow
 
 - Student, batch, and assessment screens now load workspace-scoped records from the authenticated API. Demo profiles remain available only through the optional destructive seed script.
-- `server.ts` exposes health, students, batches, notifications, student-remark update, three AI, and code-run endpoints.
+- `server.ts` exposes authentication, tenant-scoped learning, assessment, interview, reporting, analytics, notification, AI, and code-run endpoints.
 - `talentEdge.sql` defines tables for batches, users, student profiles, interview records, assessments, submissions, and notifications. Complex profile properties such as eligibility and remarks are stored as JSON strings in text columns.
 - `seed-mysql.ts` inserts demo batches, users, student profiles, and notifications. It truncates the existing demo-related tables before reseeding, so it is a demo-data setup script rather than a non-destructive migration.
-- Several screens still use local sample data or component state. For example, notifications shown by `App.tsx` are hardcoded, and the visible API integration persists remarks but does not provide full CRUD for all declared database entities.
+- The analytics dashboard now derives its trend, topic scores, and batch readiness distribution from workspace-scoped profiles and saved assessment attempts. The coding practice editor still uses a static sample problem catalog, and some product areas remain partial or use local UI state; not every entity has complete CRUD coverage.
 
 ## Important implementation boundaries
 
@@ -54,11 +54,12 @@ TalentEdge is a full-stack web portal for a 40-day campus placement-readiness bo
 | `src/utils/pdfGenerator.ts` | PDF and CSV export helpers |
 | `Campus Placement Assessment Portal.docx` | Supplied architecture and feature brief |
 | `PRODUCT_SCOPE.md` | Stage 1 product roles, proposed subscription tiers, base release scope, and open commercial decisions |
-| `src/types/subscriptions.ts` | Initial typed plan, entitlement, limit, and subscription contracts; not yet enforced by the app |
+| `src/types/subscriptions.ts` | Plan, entitlement, limit, and workspace/platform capability registries |
+| `API_AUTHORIZATION.md` | API route capabilities, public/token flows, and scope policy |
 | `migrate-auth.ts` | Idempotent local MySQL migration for workspace memberships, invitations, sessions, audit events, and batch assignments |
 | `LOCAL_SETUP.md` | Local database migration, demo seed, and first administrator setup instructions |
 
 ## Stage 3 implementation status
 
-The local app now has email/password sign-in, database-backed sessions, first-admin setup, optional college workspace registration, member invitations and password reset links, college-admin member activation controls, and workspace audit events. Authenticated role membership now drives the UI; students see their own profile, trainers are scoped to assigned batches, and college admins see workspace data. Workspace notifications and leaderboard data are also loaded through tenant-scoped API routes. These features require the `npm run db:migrate-auth` migration before the server can provide authenticated data routes.
+The local app now has email/password sign-in, database-backed sessions, first-admin setup, optional college workspace registration, member invitations and password reset links, college-admin member activation controls, and workspace audit events. Authenticated role membership drives the UI; shared API middleware enforces capabilities from `src/types/subscriptions.ts`; and student/trainer data access is limited to self or assigned batches where applicable. API route requirements and public/token flows are documented in `API_AUTHORIZATION.md`. Workspace notifications, leaderboard data, and analytics are tenant-scoped. These features require the `npm run db:migrate-auth` migration before the server can provide authenticated data routes.
 

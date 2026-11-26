@@ -1,6 +1,8 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { ASSESSMENTS_CATALOG } from './src/data/assessmentData';
 import { SUBSCRIPTION_PLANS } from './src/types/subscriptions';
 
@@ -14,6 +16,55 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 4,
 });
+
+const MIGRATION_VERSION = '20261126_readiness_ai_governance_v1';
+const MIGRATION_NAME = 'Readiness model evaluation and AI governance';
+
+async function prepareMigrationLedger() {
+  const migrationChecksum = createHash('sha256')
+    .update(await readFile(fileURLToPath(import.meta.url)))
+    .digest('hex');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS SchemaMigrations (
+      version VARCHAR(64) PRIMARY KEY,
+      name VARCHAR(191) NOT NULL,
+      checksum CHAR(64) NOT NULL,
+      appliedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  const [rows]: any = await pool.execute(
+    'SELECT checksum FROM SchemaMigrations WHERE version = ?',
+    [MIGRATION_VERSION],
+  );
+  if (rows.length && rows[0].checksum !== migrationChecksum) {
+    throw new Error(`Migration ${MIGRATION_VERSION} was already applied with a different checksum. Create a new migration version instead of editing an applied migration.`);
+  }
+
+  const [workspaceTable]: any = await pool.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Workspaces' LIMIT 1`,
+  );
+  if (!workspaceTable.length) return migrationChecksum;
+  const [[workspaceCount]]: any = await pool.query('SELECT COUNT(*) AS count FROM Workspaces');
+  if (Number(workspaceCount.count) < 2) return migrationChecksum;
+  for (const table of ['Batches', 'Notifications', 'Assessments', 'Submissions', 'InterviewRecords']) {
+    const [exists]: any = await pool.execute(
+      `SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? LIMIT 1`,
+      [table],
+    );
+    if (!exists.length) continue;
+    const [hasScopeColumn]: any = await pool.execute(
+      `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'workspaceId' LIMIT 1`,
+      [table],
+    );
+    const [[unscoped]]: any = hasScopeColumn.length
+      ? await pool.query(`SELECT COUNT(*) AS count FROM \`${table}\` WHERE workspaceId IS NULL`)
+      : await pool.query(`SELECT COUNT(*) AS count FROM \`${table}\``);
+    if (Number(unscoped.count) > 0) {
+      throw new Error(`Migration stopped before altering application tables: ${table} contains ${unscoped.count} rows without a workspace, and this database has multiple workspaces. Assign those rows to the correct workspace before retrying.`);
+    }
+  }
+  return migrationChecksum;
+}
 
 async function hasColumn(table: string, column: string) {
   const [rows]: any = await pool.query(
@@ -32,6 +83,7 @@ async function addColumn(table: string, column: string, definition: string) {
 }
 
 async function migrate() {
+  const migrationChecksum = await prepareMigrationLedger();
   await pool.query(`
     CREATE TABLE IF NOT EXISTS Workspaces (
       id VARCHAR(191) PRIMARY KEY,
@@ -575,6 +627,13 @@ async function migrate() {
   await addColumn('Assessments', 'sourceContentId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'sourceVersionId', 'VARCHAR(191) NULL');
   await addColumn('Assessments', 'isCustomized', 'TINYINT(1) NOT NULL DEFAULT 0');
+  await addColumn('Assessments', 'currentVersion', 'INT UNSIGNED NOT NULL DEFAULT 1');
+  await addColumn('Assessments', 'passPercent', 'TINYINT UNSIGNED NOT NULL DEFAULT 70');
+  await addColumn('Assessments', 'maxAttempts', 'INT UNSIGNED NOT NULL DEFAULT 0');
+  await addColumn('Assessments', 'availableAt', 'DATETIME NULL');
+  await addColumn('Assessments', 'dueAt', 'DATETIME NULL');
+  await addColumn('Assessments', 'allowLateSubmission', 'TINYINT(1) NOT NULL DEFAULT 0');
+  await addColumn('Assessments', 'resultReleasePolicy', "ENUM('immediate', 'after_due', 'manual') NOT NULL DEFAULT 'immediate'");
   for (const [table, indexName] of [['WorkspaceCurriculumMaterials', 'uq_curriculum_shared_source'], ['Assessments', 'uq_assessment_shared_source']] as const) {
     const [indexes]: any = await pool.query(`SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`, [table, indexName]);
     if (!indexes.length) await pool.query(`ALTER TABLE \`${table}\` ADD UNIQUE KEY \`${indexName}\` (workspaceId, sourceContentId)`);
@@ -592,9 +651,83 @@ async function migrate() {
     [initialSharedContent],
   );
   await addColumn('Submissions', 'workspaceId', 'VARCHAR(191) NULL');
+  await addColumn('Submissions', 'assessmentVersion', 'INT UNSIGNED NOT NULL DEFAULT 1');
+  await addColumn('Submissions', 'attemptNumber', 'INT UNSIGNED NOT NULL DEFAULT 1');
+  await addColumn('Submissions', 'gradingStatus', "ENUM('auto_graded', 'pending_review', 'reviewed') NOT NULL DEFAULT 'auto_graded'");
+  await addColumn('Submissions', 'resultReleased', 'TINYINT(1) NOT NULL DEFAULT 1');
+  await addColumn('Submissions', 'feedbackJson', 'MEDIUMTEXT NULL');
+  await addColumn('Submissions', 'codingAnswersJson', 'MEDIUMTEXT NULL');
+  await addColumn('Submissions', 'gradedByUserId', 'VARCHAR(191) NULL');
+  await addColumn('Submissions', 'gradedAt', 'DATETIME NULL');
+  await addColumn('Submissions', 'clientRequestId', 'VARCHAR(64) NULL');
+  const [submissionIdempotencyIndex]: any = await pool.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
+     AND TABLE_NAME = 'Submissions' AND INDEX_NAME = 'uq_submission_request' LIMIT 1`,
+  );
+  if (!submissionIdempotencyIndex.length) {
+    await pool.query('ALTER TABLE Submissions ADD UNIQUE KEY uq_submission_request (workspaceId, studentId, clientRequestId)');
+  }
   await addColumn('InterviewRecords', 'workspaceId', 'VARCHAR(191) NULL');
   await addColumn('InterviewRecords', 'createdByUserId', 'VARCHAR(191) NULL');
   await addColumn('InterviewRecords', 'score', 'DOUBLE NULL');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS AssessmentVersions (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      assessmentId VARCHAR(191) NOT NULL,
+      versionNumber INT UNSIGNED NOT NULL,
+      snapshotJson MEDIUMTEXT NOT NULL,
+      changeSummary VARCHAR(500) NOT NULL DEFAULT '',
+      createdByUserId VARCHAR(191) NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_assessment_version (workspaceId, assessmentId, versionNumber),
+      KEY idx_assessment_versions_created (workspaceId, assessmentId, createdAt),
+      CONSTRAINT fk_assessment_version_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_assessment_version_assessment FOREIGN KEY (assessmentId) REFERENCES Assessments(id) ON DELETE CASCADE,
+      CONSTRAINT fk_assessment_version_creator FOREIGN KEY (createdByUserId) REFERENCES Users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS AssessmentAssignmentRules (
+      assessmentId VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      batchId VARCHAR(191) NULL,
+      maxAttempts INT UNSIGNED NOT NULL DEFAULT 0,
+      availableAt DATETIME NULL,
+      dueAt DATETIME NULL,
+      allowLateSubmission TINYINT(1) NOT NULL DEFAULT 0,
+      resultReleasePolicy ENUM('immediate', 'after_due', 'manual') NOT NULL DEFAULT 'immediate',
+      updatedByUserId VARCHAR(191) NULL,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_assessment_assignment_scope (workspaceId, batchId),
+      CONSTRAINT fk_assessment_assignment_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_assessment_assignment_assessment FOREIGN KEY (assessmentId) REFERENCES Assessments(id) ON DELETE CASCADE,
+      CONSTRAINT fk_assessment_assignment_batch FOREIGN KEY (batchId) REFERENCES Batches(id) ON DELETE SET NULL,
+      CONSTRAINT fk_assessment_assignment_editor FOREIGN KEY (updatedByUserId) REFERENCES Users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ReadinessPredictionEvents (
+      id VARCHAR(191) PRIMARY KEY,
+      workspaceId VARCHAR(191) NOT NULL,
+      studentId VARCHAR(191) NOT NULL,
+      modelVersion VARCHAR(64) NOT NULL,
+      readinessScore TINYINT UNSIGNED NOT NULL,
+      predictedTier ENUM('high', 'moderate', 'needs_attention') NOT NULL,
+      predictedReady TINYINT(1) NOT NULL,
+      targetCompany VARCHAR(120) NULL,
+      evidenceJson MEDIUMTEXT NOT NULL,
+      actualOutcome ENUM('placed', 'not_placed') NULL,
+      outcomeRecordedAt DATETIME NULL,
+      outcomeRecordedBy VARCHAR(191) NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_readiness_prediction_eval (workspaceId, modelVersion, actualOutcome, createdAt),
+      KEY idx_readiness_prediction_student (workspaceId, studentId, createdAt),
+      CONSTRAINT fk_readiness_prediction_workspace FOREIGN KEY (workspaceId) REFERENCES Workspaces(id) ON DELETE CASCADE,
+      CONSTRAINT fk_readiness_prediction_student FOREIGN KEY (studentId) REFERENCES Users(id) ON DELETE CASCADE,
+      CONSTRAINT fk_readiness_prediction_outcome_actor FOREIGN KEY (outcomeRecordedBy) REFERENCES Users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
 
   const [workspaceRows]: any = await pool.query('SELECT id FROM Workspaces ORDER BY createdAt LIMIT 1');
   let workspaceId: string;
@@ -610,6 +743,9 @@ async function migrate() {
 
   await pool.execute('UPDATE Batches SET workspaceId = ? WHERE workspaceId IS NULL', [workspaceId]);
   await pool.execute('UPDATE Notifications SET workspaceId = ? WHERE workspaceId IS NULL', [workspaceId]);
+  await pool.execute('UPDATE Assessments SET workspaceId = ? WHERE workspaceId IS NULL', [workspaceId]);
+  await pool.execute('UPDATE Submissions SET workspaceId = ? WHERE workspaceId IS NULL', [workspaceId]);
+  await pool.execute('UPDATE InterviewRecords SET workspaceId = ? WHERE workspaceId IS NULL', [workspaceId]);
 
   const [users]: any = await pool.query('SELECT id, role FROM Users');
   for (const user of users) {
@@ -697,12 +833,50 @@ async function migrate() {
         ],
       );
     }
+    await pool.execute(
+      `INSERT IGNORE INTO AssessmentAssignmentRules
+       (assessmentId, workspaceId, batchId, maxAttempts, availableAt, dueAt, allowLateSubmission, resultReleasePolicy)
+       SELECT id, workspaceId, batchId, maxAttempts, availableAt, dueAt, allowLateSubmission, resultReleasePolicy
+       FROM Assessments WHERE workspaceId = ?`,
+      [workspace.id],
+    );
+    await pool.execute(
+      `INSERT IGNORE INTO AssessmentVersions
+       (id, workspaceId, assessmentId, versionNumber, snapshotJson, changeSummary, createdByUserId)
+       SELECT UUID(), workspaceId, id, currentVersion,
+         JSON_OBJECT('title', title, 'dayNumber', dayNumber, 'type', type, 'durationMinutes', durationMinutes,
+           'totalMarks', totalMarks, 'passPercent', passPercent, 'coverageJson', coverageJson, 'purpose', purpose, 'status', status,
+           'scheduledDate', scheduledDate, 'sections', CASE WHEN JSON_VALID(sectionsJson) THEN JSON_EXTRACT(sectionsJson, '$') ELSE JSON_ARRAY() END, 'targetCompaniesJson', targetCompaniesJson,
+           'batchId', batchId, 'currentVersion', currentVersion, 'maxAttempts', maxAttempts,
+           'availableAt', availableAt, 'dueAt', dueAt, 'allowLateSubmission', allowLateSubmission,
+           'resultReleasePolicy', resultReleasePolicy),
+         'Baseline snapshot', createdByUserId
+       FROM Assessments WHERE workspaceId = ?`,
+      [workspace.id],
+    );
   }
 
   console.log(`Authentication and workspace schema is ready. Default workspace: ${workspaceId}`);
+  await pool.execute(
+    'INSERT IGNORE INTO SchemaMigrations (version, name, checksum) VALUES (?, ?, ?)',
+    [MIGRATION_VERSION, MIGRATION_NAME, migrationChecksum],
+  );
 }
 
-migrate()
+async function runMigration() {
+  const lockName = `talentedge:migrate:${process.env.DB_NAME || 'talentedge'}`;
+  const [lockRows]: any = await pool.execute('SELECT GET_LOCK(?, 30) AS acquired', [lockName]);
+  if (Number(lockRows?.[0]?.acquired) !== 1) {
+    throw new Error('Could not acquire the database migration lock within 30 seconds.');
+  }
+  try {
+    await migrate();
+  } finally {
+    await pool.execute('SELECT RELEASE_LOCK(?)', [lockName]);
+  }
+}
+
+runMigration()
   .catch((error) => {
     console.error('Authentication migration failed:', error);
     process.exitCode = 1;
