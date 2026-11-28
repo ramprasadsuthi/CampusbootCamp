@@ -104,7 +104,24 @@ Local college registration does not verify email addresses; keep it disabled in 
 
 ## Isolated coding assessment execution
 
-Coding runs and assessment submissions use a separately hosted Judge0 CE service. Set JUDGE0_URL and, when configured on the Judge0 instance, JUDGE0_AUTH_TOKEN and JUDGE0_AUTH_USER in the server environment. Runtime IDs are discovered from the Judge0 /languages endpoint and cached for ten minutes, so the service can upgrade its runtime versions without relying on hard-coded IDs. The TalentEdge server sends source code and server-owned test cases directly to Judge0; do not expose these settings in browser configuration. JUDGE0_CPU_LIMIT, JUDGE0_WALL_LIMIT, and JUDGE0_MEMORY_LIMIT_KB set per-run ceilings (defaults: 2 seconds CPU, 5 seconds wall time, 128000 KB memory). Network access is disabled and the server caps each judge request/poll sequence. If Judge0 is unavailable, the run or submission fails instead of returning a simulated pass. Coding assessment scores are calculated from the proportion of test cases passed; trainers can still review and adjust submitted results. The bundled Two Sum, Longest Substring, and Subarray Sum exercises receive language-specific stdin/stdout harnesses. Custom coding questions must provide programs that read the configured test input from stdin and write the expected output to stdout.
+Coding runs and assessment submissions use a separate Judge0-compatible service. This can be self-hosted Judge0 CE or a managed provider that exposes the Judge0 API. TalentEdge's current integration expects a base API URL and supports the standard `X-Auth-Token` and `X-Auth-User` headers. The provider must expose `GET /languages`, `POST /submissions?base64_encoded=false&wait=false`, and `GET /submissions/:token?base64_encoded=false`; it must return the standard Judge0 language and submission response shapes. A provider that requires different authentication headers (for example, RapidAPI-specific headers) needs a small server-side adapter change before it can be used. Confirm the provider's API contract, quotas, retention, and processing terms before sending student code.
+
+Set the following values in the TalentEdge **server environment/secrets manager**, never in browser configuration:
+
+```ini
+JUDGE0_URL=https://<managed-judge0-api-base-url>
+JUDGE0_AUTH_TOKEN=<provider-token-if-using-X-Auth-Token>
+JUDGE0_AUTH_USER=<provider-user-token-if-using-X-Auth-User>
+JUDGE0_CPU_LIMIT=2
+JUDGE0_WALL_LIMIT=5
+JUDGE0_MEMORY_LIMIT_KB=128000
+```
+
+Use the exact base URL supplied by the provider with no trailing slash. Leave either auth variable empty only if the provider confirms that header is not required. If using self-hosted Judge0, set and protect matching API credentials in `judge0.conf`, restrict access to the TalentEdge server, and use a private HTTPS endpoint.
+
+At startup/on first run, TalentEdge fetches `/languages` and caches supported runtime IDs for ten minutes. The service must list compatible language names for C, C++, Java, JavaScript, and Python. TalentEdge sends source code and server-owned test cases to Judge0; do not put student names or other identifiers in code or test input. The server applies per-run ceilings (defaults: 2 seconds CPU, 5 seconds wall time, 128000 KB memory), explicitly disables code network access, and caps each test suite at a 30-second request window. If the service is unavailable, a run/submission fails instead of returning a simulated pass. Coding scores use the proportion of test cases passed; trainers can still review and adjust submitted results. The bundled Two Sum, Longest Substring, and Subarray Sum exercises receive language-specific stdin/stdout harnesses. Custom coding questions must read configured test input from stdin and write expected output to stdout.
+
+Before pilot use, verify authenticated language discovery, one passing sample, compile/runtime failure handling, timeout/memory behavior, and provider outage behavior in staging. Load-test a realistic peak because each coding test case is sent as an individual Judge0 submission. See [FEATURE_GUIDE.md](FEATURE_GUIDE.md) for the coding workflow.
 
 ## Readiness and AI governance
 
