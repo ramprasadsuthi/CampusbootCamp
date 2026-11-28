@@ -65,7 +65,8 @@ const JUDGE0_LANGUAGE_PATTERNS: Record<string, RegExp> = {
   cpp: /^C\+\+\s*\(/i,
   java: /^Java\s*\(/i,
   javascript: /^JavaScript\s*\(/i,
-  python: /^Python\s*\(/i,
+  // The editor templates use Python 3 syntax; do not select an earlier Python 2 runtime.
+  python: /^Python\s*\(3(?:\.\d+)*\)/i,
 };
 let judge0LanguagesCache: { fetchedAt: number; ids: Record<string, number> } | null = null;
 async function getJudge0LanguageId(language: string, endpoint: string, headers: Record<string, string>) {
@@ -185,13 +186,17 @@ async function executeOnJudge0(sourceCode: string, language: string, testCases: 
       });
       if (!createdResponse.ok) throw new Error(`Judge0 returned HTTP ${createdResponse.status}.`);
       let result: any = await createdResponse.json();
-      for (let poll = 0; (result.status?.id === 1 || result.status?.id === 2) && result.token && poll < 24; poll += 1) {
+      if (typeof result.token !== 'string' || !result.token) throw new Error('Judge0 did not return a submission token.');
+      const isPending = (submission: any) => submission?.status?.id === 1 || submission?.status?.id === 2;
+      const hasFinalStatus = (submission: any) => Number.isInteger(submission?.status?.id) && !isPending(submission);
+      // Judge0's wait=false create response usually contains only the token, so poll it regardless of an initial status.
+      for (let poll = 0; !hasFinalStatus(result) && poll < 24; poll += 1) {
         await new Promise((resolve) => setTimeout(resolve, 400));
         const statusResponse = await fetch(`${endpoint}/submissions/${encodeURIComponent(result.token)}?base64_encoded=false`, { headers, signal: controller.signal });
         if (!statusResponse.ok) throw new Error(`Judge0 returned HTTP ${statusResponse.status} while collecting results.`);
         result = await statusResponse.json();
       }
-      if (result.status?.id === 1 || result.status?.id === 2) throw new Error('Judge0 execution timed out while waiting for the result.');
+      if (!hasFinalStatus(result)) throw new Error('Judge0 execution timed out or returned no final submission status.');
       const actual = String(result.stdout || '').replace(/\r\n/g, '\n').trimEnd();
       const expected = testCase.expected === undefined ? undefined : String(testCase.expected).replace(/\r\n/g, '\n').trimEnd();
       const comparable = (value: string) => {

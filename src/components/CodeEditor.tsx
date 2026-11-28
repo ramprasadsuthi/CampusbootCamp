@@ -424,29 +424,30 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
                         {executionResult.results?.map((res: any, idx: number) => (
                           <div
                             key={idx}
-                            className="p-2 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between text-xs font-mono"
+                            className="space-y-2 rounded-lg border border-slate-200/60 bg-slate-50 p-2.5 font-mono text-xs dark:border-slate-700/60 dark:bg-slate-800/60"
                           >
-                            <div className="flex items-center gap-2">
-                              {res.passed ? (
-                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                              ) : (
-                                <XCircle className="w-3.5 h-3.5 text-rose-500" />
-                              )}
-                              <span className="font-semibold text-slate-700 dark:text-slate-300">
-                                Test Case #{res.testCaseId} {res.hidden && '(Hidden)'}
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="flex items-center gap-2">
+                                {res.passed ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                                ) : (
+                                  <XCircle className="w-3.5 h-3.5 text-rose-500" />
+                                )}
+                                <span className="font-semibold text-slate-700 dark:text-slate-300">
+                                  Test Case #{res.testCaseId} {res.hidden && '(Hidden)'}
+                                </span>
+                              </div>
+                              <span className={`text-[11px] font-bold ${res.passed ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600'}`}>
+                                {res.status || (res.passed ? 'Passed' : 'Failed')}
                               </span>
                             </div>
-
-                            <div className="flex items-center gap-3 text-[11px]">
-                              <span>{res.executionTimeMs} ms</span>
-                              <span
-                                className={`font-bold ${
-                                  res.passed ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600'
-                                }`}
-                              >
-                                {res.passed ? 'Passed' : 'Failed'}
-                              </span>
-                            </div>
+                            {!res.hidden && (
+                              <div className="space-y-1 border-t border-slate-200/70 pt-2 text-[11px] dark:border-slate-700">
+                                {res.expected !== undefined && <p className="break-words text-slate-600 dark:text-slate-300">Expected: {res.expected || '(empty output)'}</p>}
+                                {res.actual !== undefined && <p className="break-words text-slate-600 dark:text-slate-300">Output: {res.actual || '(empty output)'}</p>}
+                                {res.error && <pre className="whitespace-pre-wrap break-words text-rose-700 dark:text-rose-300">{res.error}</pre>}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
